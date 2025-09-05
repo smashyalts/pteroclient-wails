@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>Pterodactyl Manager</title>
+    <link rel="stylesheet" href="./src/style.css">
+    <style>
+        /* Enhanced file manager styles */
+        .file-manager {
+            display: flex;
+            height: calc(100vh - 140px);
+        }
+        
+        .file-tree {
+            width: 300px;
+            min-width: 200px;
+            resize: horizontal;
+            overflow: auto;
+            border-right: 2px solid var(--bg-tertiary);
+        }
+        
+        .editor-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .editor-header {
+            display: flex;
+            align-items: center;
+            padding: 8px 12px;
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--bg-tertiary);
+            min-height: 40px;
+        }
+        
+        .editor-tabs {
+            display: flex;
+            flex: 1;
+            gap: 4px;
+            align-items: center;
+            overflow-x: auto;
+        }
+        
+        .editor-tab {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            background: var(--bg-primary);
+            border: 1px solid var(--bg-tertiary);
+            border-radius: 4px 4px 0 0;
+            cursor: pointer;
+            white-space: nowrap;
+            font-size: 13px;
+        }
+        
+        .editor-tab.active {
+            background: var(--bg-tertiary);
+            border-bottom-color: var(--bg-tertiary);
+        }
+        
+        .editor-tab.modified::after {
+            content: "•";
+            color: var(--accent);
+            margin-left: 4px;
+        }
+        
+        .editor-tab .close {
+            opacity: 0.5;
+            cursor: pointer;
+            padding: 0 4px;
+        }
+        
+        .editor-tab .close:hover {
+            opacity: 1;
+        }
+        
+        .editor-actions {
+            display: flex;
+            gap: 8px;
+        }
+        
+        #editor {
+            flex: 1;
+            background: var(--bg-primary);
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            overflow: auto;
+        }
+        
+        .editor-textarea {
+            width: 100%;
+            height: 100%;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            border: none;
+            outline: none;
+            padding: 12px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            line-height: 1.5;
+            resize: none;
+        }
+        
+        .file-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 12px;
+            cursor: pointer;
+            user-select: none;
+            font-size: 13px;
+        }
+        
+        .file-item:hover {
+            background: var(--bg-secondary);
+        }
+        
+        .file-item.selected {
+            background: var(--accent);
+            color: white;
+        }
+        
+        .file-icon {
+            width: 16px;
+            text-align: center;
+            opacity: 0.7;
+        }
+        
+        .file-name {
+            flex: 1;
+        }
+        
+        .file-size {
+            font-size: 11px;
+            opacity: 0.6;
+            margin-left: auto;
+        }
+        
+        /* Status bar */
+        .status-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 4px 12px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--bg-tertiary);
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+        
+        .status-left {
+            display: flex;
+            gap: 16px;
+        }
+        
+        .status-right {
+            display: flex;
+            gap: 16px;
+        }
+        
+        /* Welcome screen */
+        .welcome-screen {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100%;
+            color: var(--text-secondary);
+        }
+        
+        .welcome-screen h2 {
+            margin-bottom: 20px;
+        }
+        
+        .recent-files {
+            list-style: none;
+            padding: 0;
+        }
+        
+        .recent-files li {
+            padding: 8px 16px;
+            cursor: pointer;
+            border-radius: 4px;
+        }
+        
+        .recent-files li:hover {
+            background: var(--bg-secondary);
+        }
+        
+        /* Settings */
+        .settings-group {
+            margin-bottom: 16px;
+        }
+        
+        .settings-group h3 {
+            margin-bottom: 8px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+        
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 8px 0;
+        }
+        
+        .checkbox-group input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="header">
+        <div class="logo">
+            <span class="logo-text">Pterodactyl Manager</span>
+        </div>
+        <div class="header-right">
+            <div class="status">
+                <span class="status-dot" id="statusDot"></span>
+                <span id="statusText">Disconnected</span>
+            </div>
+            <button class="btn-icon" onclick="window.app.showSettings()">Settings</button>
+        </div>
+    </div>
+    
+    <!-- Tabs -->
+    <div class="tabs">
+        <button class="tab active" onclick="window.app.switchTab('files')">Files</button>
+        <button class="tab" onclick="window.app.switchTab('console')">Console</button>
+    </div>
+    
+    <!-- Files Tab -->
+    <div id="filesTab" class="tab-content active">
+        <div class="toolbar">
+            <button onclick="window.app.refreshFiles()">Refresh</button>
+            <button onclick="window.app.uploadFile()">Upload</button>
+            <button onclick="window.app.newFolder()">New Folder</button>
+            <button onclick="window.app.newFile()">New File</button>
+            <button onclick="window.app.deleteSelected()" class="danger">Delete</button>
+            <div class="path-bar">
+                <span>Path:</span>
+                <input type="text" id="currentPath" value="/" readonly>
+            </div>
+        </div>
+        
+        <div class="file-manager">
+            <div class="file-tree" id="fileTree">
+                <div class="loading">Loading files...</div>
+            </div>
+            
+            <div class="editor-container">
+                <div class="editor-header">
+                    <div class="editor-tabs" id="editorTabs">
+                        <!-- Tabs will be added here dynamically -->
+                    </div>
+                    <div class="editor-actions">
+                        <button onclick="window.app.saveFile()" id="saveBtn" style="display:none;">Save</button>
+                        <button onclick="window.app.saveAllFiles()" id="saveAllBtn" style="display:none;">Save All</button>
+                        <button onclick="window.app.closeFile()" id="closeBtn" style="display:none;">Close</button>
+                    </div>
+                </div>
+                
+                <div id="editor">
+                    <div class="welcome-screen">
+                        <h2>Welcome to Pterodactyl Manager</h2>
+                        <p>Select a file from the file tree to edit</p>
+                        <p>Or create a new file</p>
+                        
+                        <div style="margin-top: 40px;">
+                            <h3>Keyboard Shortcuts</h3>
+                            <ul style="list-style: none; padding: 0; text-align: left;">
+                                <li>Ctrl+S - Save current file</li>
+                                <li>Ctrl+Shift+S - Save all files</li>
+                                <li>Ctrl+W - Close current file</li>
+                                <li>Ctrl+N - New file</li>
+                                <li>Ctrl+O - Open file</li>
+                            </ul>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="status-bar">
+                    <div class="status-left">
+                        <span id="cursorPosition">Line 1, Col 1</span>
+                        <span id="fileType">Plain Text</span>
+                    </div>
+                    <div class="status-right">
+                        <span id="encoding">UTF-8</span>
+                        <span id="lineEndings">LF</span>
+                        <span id="autoSaveStatus">Auto-save: Off</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Console Tab -->
+    <div id="consoleTab" class="tab-content">
+        <div class="console-toolbar">
+            <button onclick="window.app.connectConsole()" id="connectBtn">Connect</button>
+            <button onclick="window.app.clearConsole()">Clear</button>
+            <div class="power-controls">
+                <button onclick="window.app.sendPower('start')" class="success">Start</button>
+                <button onclick="window.app.sendPower('stop')">Stop</button>
+                <button onclick="window.app.sendPower('restart')">Restart</button>
+                <button onclick="window.app.sendPower('kill')" class="danger">Kill</button>
+            </div>
+        </div>
+        
+        <div class="console-container">
+            <div id="console"></div>
+            <div class="input-container">
+                <input type="text" id="commandInput" placeholder="Enter command..." />
+                <button onclick="window.app.sendCommand()">Send</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Settings</h2>
+                <button class="close" onclick="window.app.closeSettings()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-group">
+                    <h3>Server Configuration</h3>
+                    <div class="form-group">
+                        <label>Panel URL:</label>
+                        <input type="text" id="panelUrl" placeholder="https://panel.example.com">
+                    </div>
+                    <div class="form-group">
+                        <label>API Key:</label>
+                        <input type="password" id="apiKey" placeholder="ptlc_...">
+                    </div>
+                    <div class="form-group">
+                        <label>Server ID:</label>
+                        <input type="text" id="serverId" placeholder="abc123">
+                    </div>
+                </div>
+                
+                <div class="settings-group">
+                    <h3>Editor Settings</h3>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="autoSave" onchange="window.app.toggleAutoSave()">
+                        <label for="autoSave">Auto-save when switching files</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="wordWrap" onchange="window.app.toggleWordWrap()">
+                        <label for="wordWrap">Word wrap</label>
+                    </div>
+                    <div class="checkbox-group">
+                        <input type="checkbox" id="showLineNumbers" checked onchange="window.app.toggleLineNumbers()">
+                        <label for="showLineNumbers">Show line numbers</label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button onclick="window.app.saveSettings()" class="primary">Save & Connect</button>
+                <button onclick="window.app.closeSettings()">Cancel</button>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Context Menu -->
+    <div id="contextMenu" class="context-menu">
+        <div class="menu-item" onclick="window.app.openFile()">Open</div>
+        <div class="menu-item" onclick="window.app.openInNewTab()">Open in New Tab</div>
+        <div class="menu-item" onclick="window.app.renameFile()">Rename</div>
+        <div class="menu-item" onclick="window.app.duplicateFile()">Duplicate</div>
+        <div class="separator"></div>
+        <div class="menu-item" onclick="window.app.copyPath()">Copy Path</div>
+        <div class="menu-item" onclick="window.app.downloadFile()">Download</div>
+        <div class="separator"></div>
+        <div class="menu-item danger" onclick="window.app.deleteFile()">Delete</div>
+    </div>
+    
+    <!-- File Upload Input (hidden) -->
+    <input type="file" id="fileInput" style="display: none;" multiple>
+    
+    <script src="./main-editor.js"></script>
+</body>
+</html>
