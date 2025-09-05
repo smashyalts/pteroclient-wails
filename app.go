@@ -35,8 +35,9 @@ func (a *App) startup(ctx context.Context) {
 		return
 	}
 	
-	// Connect if configured
-	if a.config.IsConfigured() {
+	// Connect if we have panel URL and API key (server ID is optional now)
+	cfg := a.config.GetConfig()
+	if cfg.PanelURL != "" && cfg.APIKey != "" {
 		a.Connect()
 	}
 }
@@ -45,12 +46,28 @@ func (a *App) startup(ctx context.Context) {
 func (a *App) Connect() error {
 	cfg := a.config.GetConfig()
 	
-	a.client = pterodactyl.NewClient(cfg.PanelURL, cfg.APIKey, cfg.ServerID)
+	// Create client with empty server ID initially if not set
+	serverID := cfg.ServerID
+	if serverID == "" {
+		// Use empty string, will need to select server from dropdown
+		serverID = ""
+	}
 	
-	// Test connection
-	_, err := a.client.GetServerState()
-	if err != nil {
-		return fmt.Errorf("connection failed: %v", err)
+	a.client = pterodactyl.NewClient(cfg.PanelURL, cfg.APIKey, serverID)
+	
+	// If no server ID, just test API connection without server-specific call
+	if serverID != "" {
+		// Test connection to specific server
+		_, err := a.client.GetServerState()
+		if err != nil {
+			return fmt.Errorf("connection failed: %v", err)
+		}
+	} else {
+		// Just test that we can list servers (API key is valid)
+		_, err := a.client.ListServers()
+		if err != nil {
+			return fmt.Errorf("API connection failed: %v", err)
+		}
 	}
 	
 	runtime.EventsEmit(a.ctx, "connected", true)

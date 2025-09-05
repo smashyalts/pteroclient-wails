@@ -258,7 +258,8 @@ function initApp() {
                 const config = await window.go.main.App.GetConfig();
                 console.log('Config loaded:', config);
                 
-                if (config && config.panelURL && config.apiKey && config.serverID) {
+                if (config && config.panelURL && config.apiKey) {
+                    // Connect even without server ID (we'll select from dropdown)
                     await this.connect();
                     // Load servers after connecting
                     await this.loadServers();
@@ -343,6 +344,16 @@ function initApp() {
         
         // File Manager
         async loadFiles(path) {
+            // Check if a server is selected first
+            const config = await window.go.main.App.GetConfig();
+            if (!config.serverID) {
+                const tree = document.getElementById('fileTree');
+                if (tree) {
+                    tree.innerHTML = '<div class="preview-empty">Please select a server from the dropdown above</div>';
+                }
+                return;
+            }
+            
             console.log('Loading files from:', path);
             this.currentPath = path;
             
