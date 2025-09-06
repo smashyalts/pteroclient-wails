@@ -13,7 +13,7 @@ import (
 // App struct
 type App struct {
 	ctx          context.Context
-	config       *config.ConfigManager
+	config       *config.MultiConfigManager
 	client       *pterodactyl.Client
 	consoleWS    *pterodactyl.ConsoleWebSocket
 }
@@ -27,17 +27,16 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	
-	// Initialize config
+	// Initialize multi-panel config
 	var err error
-	a.config, err = config.NewConfigManager()
+	a.config, err = config.NewMultiConfigManager()
 	if err != nil {
 		runtime.LogError(a.ctx, "Failed to initialize config: "+err.Error())
 		return
 	}
 	
-	// Connect if we have panel URL and API key (server ID is optional now)
-	cfg := a.config.GetConfig()
-	if cfg.PanelURL != "" && cfg.APIKey != "" {
+	// Connect if we have an active configured panel
+	if a.config.IsConfigured() {
 		a.Connect()
 	}
 }
@@ -114,11 +113,8 @@ func (a *App) SwitchServer(serverID string) error {
 	// Update client server ID
 	a.client.SetServerID(serverID)
 	
-	// Update config
-	cfg := a.config.GetConfig()
-	cfg.ServerID = serverID
-	a.config.SetConfig(cfg)
-	a.config.Save()
+	// Update config for active panel
+	a.config.UpdateActivePanelServer(serverID)
 	
 	// Test connection to new server
 	_, err := a.client.GetServerState()
@@ -130,6 +126,104 @@ func (a *App) SwitchServer(serverID string) error {
 	runtime.EventsEmit(a.ctx, "server-changed", serverID)
 	
 	return nil
+}
+
+// Panel Management Methods
+
+// ListPanels returns the names of all configured panels
+func (a *App) ListPanels() []string {
+	panels := a.config.GetPanels()
+	names := make([]string, len(panels))
+	for i, p := range panels {
+		names[i] = p.Name
+	}
+	return names
+}
+
+// SetActivePanel sets the active panel by name
+func (a *App) SetActivePanel(panelName string) error {
+	return a.config.SetActivePanel(panelName)
+}
+
+// GetPanels returns all configured panels
+func (a *App) GetPanels() []map[string]interface{} {
+	panels := a.config.GetPanels()
+	result := make([]map[string]interface{}, len(panels))
+	
+	for i, p := range panels {
+		result[i] = map[string]interface{}{
+			"name":     p.Name,
+			"panelURL": p.PanelURL,
+			"serverID": p.ServerID,
+		}
+	}
+	
+	return result
+}
+
+// GetActivePanel returns the name of the active panel
+func (a *App) GetActivePanel() string {
+	return a.config.GetActivePanelName()
+}
+
+// SwitchPanel switches to a different panel
+func (a *App) SwitchPanel(panelName string) error {
+	// Disconnect console if connected
+	if a.consoleWS != nil && a.consoleWS.IsConnected() {
+		a.consoleWS.Close()
+		runtime.EventsEmit(a.ctx, "console-connected", false)
+	}
+	
+	// Set the active panel
+	if err := a.config.SetActivePanel(panelName); err != nil {
+		return err
+	}
+	
+	// Reconnect with new panel
+	if err := a.Connect(); err != nil {
+		return err
+	}
+	
+	// Emit panel changed event
+	runtime.EventsEmit(a.ctx, "panel-changed", panelName)
+	
+	return nil
+}
+
+// AddPanel adds a new panel configuration
+func (a *App) AddPanel(name, panelURL, apiKey string) error {
+	if name == "" || panelURL == "" || apiKey == "" {
+		return fmt.Errorf("name, panel URL, and API key are required")
+	}
+	
+	panel := config.PanelConfig{
+		Name:     name,
+		PanelURL: panelURL,
+		APIKey:   apiKey,
+	}
+	
+	return a.config.AddOrUpdatePanel(panel)
+}
+
+// RemovePanel removes a panel configuration
+func (a *App) RemovePanel(name string) error {
+	// Can't remove the active panel if it's the only one
+	panels := a.config.GetPanels()
+	if len(panels) <= 1 {
+		return fmt.Errorf("cannot remove the last panel")
+	}
+	
+	// If removing active panel, switch to another first
+	if a.config.GetActivePanelName() == name {
+		for _, p := range panels {
+			if p.Name != name {
+				a.SwitchPanel(p.Name)
+				break
+			}
+		}
+	}
+	
+	return a.config.RemovePanel(name)
 }
 
 // GetConfig returns current config

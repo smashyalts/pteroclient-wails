@@ -255,6 +255,10 @@ function initApp() {
         
         async checkConfig() {
             try {
+                // Load panels first
+                await this.loadPanels();
+                
+                const panels = await window.go.main.App.ListPanels();
                 const config = await window.go.main.App.GetConfig();
                 console.log('Config loaded:', config);
                 
@@ -263,8 +267,9 @@ function initApp() {
                     await this.connect();
                     // Load servers after connecting
                     await this.loadServers();
-                } else {
-                    this.showSettings();
+                } else if (panels.length === 0) {
+                    // No panels configured, show panel manager
+                    this.showPanelManager();
                 }
                 
                 // Load editor preferences
@@ -288,7 +293,7 @@ function initApp() {
                 this.updateAutoSaveStatus();
             } catch (err) {
                 console.error('Config check failed:', err);
-                this.showSettings();
+                this.showPanelManager();
             }
         },
         
@@ -1071,6 +1076,156 @@ function initApp() {
                     if (keyInput) keyInput.value = config.apiKey || '';
                     if (idInput) idInput.value = config.serverID || '';
                 });
+            }
+        },
+        
+        // Panel Management
+        async showPanelManager() {
+            const modal = document.getElementById('panelManagerModal');
+            if (modal) {
+                modal.classList.add('show');
+                await this.loadPanelList();
+            }
+        },
+        
+        closePanelManager() {
+            const modal = document.getElementById('panelManagerModal');
+            if (modal) modal.classList.remove('show');
+        },
+        
+        async loadPanelList() {
+            try {
+                const panels = await window.go.main.App.ListPanels();
+                const activePanel = await window.go.main.App.GetActivePanel();
+                const listEl = document.getElementById('panelList');
+                
+                if (!listEl) return;
+                
+                if (panels.length === 0) {
+                    listEl.innerHTML = '<div style="padding: 20px; text-align: center; color: var(--text-secondary);">No panels configured. Add one below.</div>';
+                    return;
+                }
+                
+                listEl.innerHTML = panels.map(panel => `
+                    <div class="panel-item ${panel === activePanel ? 'active' : ''}" data-panel="${panel}">
+                        <div class="panel-info">
+                            <div class="panel-name">${panel}</div>
+                            <div class="panel-url">Panel configuration</div>
+                        </div>
+                        <div class="panel-actions">
+                            ${panel !== activePanel ? `<button onclick="window.app.switchPanel('${panel}')">Switch</button>` : ''}
+                            <button onclick="window.app.removePanel('${panel}')" class="danger">Remove</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (err) {
+                console.error('Failed to load panel list:', err);
+            }
+        },
+        
+        async switchPanel(panelName) {
+            if (!panelName) return;
+            
+            try {
+                console.log('Switching to panel:', panelName);
+                await window.go.main.App.SetActivePanel(panelName);
+                
+                // Update panel dropdown
+                const dropdown = document.getElementById('panelDropdown');
+                if (dropdown) {
+                    dropdown.value = panelName;
+                }
+                
+                // Reconnect with new panel
+                await this.connect();
+                
+                // Reload panel list if modal is open
+                const modal = document.getElementById('panelManagerModal');
+                if (modal && modal.classList.contains('show')) {
+                    await this.loadPanelList();
+                }
+                
+                // Load servers for the new panel
+                await this.loadServers();
+                
+                // Clear and reload files
+                await this.loadFiles();
+            } catch (err) {
+                console.error('Failed to switch panel:', err);
+                alert('Failed to switch panel: ' + err);
+            }
+        },
+        
+        async addNewPanel() {
+            const name = document.getElementById('newPanelName')?.value?.trim();
+            const url = document.getElementById('newPanelUrl')?.value?.trim();
+            const apiKey = document.getElementById('newPanelApiKey')?.value?.trim();
+            
+            if (!name || !url || !apiKey) {
+                alert('All fields are required to add a new panel');
+                return;
+            }
+            
+            try {
+                await window.go.main.App.AddPanel(name, url, apiKey);
+                
+                // Clear form
+                document.getElementById('newPanelName').value = '';
+                document.getElementById('newPanelUrl').value = '';
+                document.getElementById('newPanelApiKey').value = '';
+                
+                // Reload panel list
+                await this.loadPanelList();
+                await this.loadPanels();
+                
+                alert('Panel added successfully!');
+            } catch (err) {
+                console.error('Failed to add panel:', err);
+                alert('Failed to add panel: ' + err);
+            }
+        },
+        
+        async removePanel(panelName) {
+            if (!confirm(`Are you sure you want to remove the panel "${panelName}"?`)) {
+                return;
+            }
+            
+            try {
+                await window.go.main.App.RemovePanel(panelName);
+                await this.loadPanelList();
+                await this.loadPanels();
+            } catch (err) {
+                console.error('Failed to remove panel:', err);
+                alert('Failed to remove panel: ' + err);
+            }
+        },
+        
+        async loadPanels() {
+            try {
+                const panels = await window.go.main.App.ListPanels();
+                const activePanel = await window.go.main.App.GetActivePanel();
+                const dropdown = document.getElementById('panelDropdown');
+                
+                if (!dropdown) return;
+                
+                // Clear existing options
+                dropdown.innerHTML = '<option value="" disabled>Select Panel</option>';
+                
+                // Add panel options
+                panels.forEach(panel => {
+                    const option = document.createElement('option');
+                    option.value = panel;
+                    option.textContent = panel;
+                    option.selected = panel === activePanel;
+                    dropdown.appendChild(option);
+                });
+                
+                // If no panel is selected and we have panels, prompt to select
+                if (!activePanel && panels.length > 0) {
+                    dropdown.value = '';
+                }
+            } catch (err) {
+                console.error('Failed to load panels:', err);
             }
         },
         

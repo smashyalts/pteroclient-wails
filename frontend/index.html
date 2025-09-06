@@ -223,17 +223,22 @@
             <span class="logo-text">Pterodactyl Manager</span>
         </div>
         <div class="header-right">
+            <div class="panel-selector">
+                <select id="panelDropdown" onchange="window.app.switchPanel(this.value)">
+                    <option value="" disabled selected>Select Panel</option>
+                </select>
+                <button class="btn-manage" onclick="window.app.showPanelManager()" title="Manage panels">⚙️</button>
+            </div>
             <div class="server-selector">
-                <select id="serverDropdown" onchange="app.switchServer(this.value)">
+                <select id="serverDropdown" onchange="window.app.switchServer(this.value)">
                     <option value="" disabled selected>Select Server</option>
                 </select>
-                <button class="btn-refresh" onclick="app.loadServers()" title="Refresh servers">🔄</button>
+                <button class="btn-refresh" onclick="window.app.loadServers()" title="Refresh servers">🔄</button>
             </div>
             <div class="status-indicator">
                 <span id="statusDot" class="status-dot"></span>
                 <span id="statusText">Disconnected</span>
             </div>
-            <button class="btn-settings" onclick="app.showSettings()">Settings</button>
         </div>
     </div>
     
@@ -330,52 +335,6 @@
         </div>
     </div>
     
-    <!-- Settings Modal -->
-    <div id="settingsModal" class="modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h2>Settings</h2>
-                <button class="close" onclick="window.app.closeSettings()">&times;</button>
-            </div>
-            <div class="modal-body">
-                <div class="settings-group">
-                    <h3>Server Configuration</h3>
-                    <div class="form-group">
-                        <label>Panel URL:</label>
-                        <input type="text" id="panelUrl" placeholder="https://panel.example.com">
-                    </div>
-                    <div class="form-group">
-                        <label>API Key:</label>
-                        <input type="password" id="apiKey" placeholder="ptlc_...">
-                    </div>
-                    <div class="form-group">
-                        <label>Server ID (Optional - use dropdown instead):</label>
-                        <input type="text" id="serverId" placeholder="Leave empty to select from dropdown">
-                    </div>
-                </div>
-                
-                <div class="settings-group">
-                    <h3>Editor Settings</h3>
-                    <div class="checkbox-group">
-                        <input type="checkbox" id="autoSave" onchange="window.app.toggleAutoSave()">
-                        <label for="autoSave">Auto-save when switching files</label>
-                    </div>
-                    <div class="checkbox-group">
-                        <input type="checkbox" id="wordWrap" onchange="window.app.toggleWordWrap()">
-                        <label for="wordWrap">Word wrap</label>
-                    </div>
-                    <div class="checkbox-group">
-                        <input type="checkbox" id="showLineNumbers" checked onchange="window.app.toggleLineNumbers()">
-                        <label for="showLineNumbers">Show line numbers</label>
-                    </div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button onclick="window.app.saveSettings()" class="primary">Save & Connect</button>
-                <button onclick="window.app.closeSettings()">Cancel</button>
-            </div>
-        </div>
-    </div>
     
     <!-- Context Menu -->
     <div id="contextMenu" class="context-menu">
@@ -388,6 +347,38 @@
         <div class="menu-item" onclick="window.app.downloadFile()">Download</div>
         <div class="separator"></div>
         <div class="menu-item danger" onclick="window.app.deleteFile()">Delete</div>
+    </div>
+    
+    <!-- Panel Manager Modal -->
+    <div id="panelManagerModal" class="modal">
+        <div class="modal-content" style="width: 600px;">
+            <div class="modal-header">
+                <h2>Panel Manager</h2>
+                <button class="close" onclick="window.app.closePanelManager()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="panel-list" id="panelList">
+                    <!-- Panels will be listed here -->
+                </div>
+                
+                <div class="settings-group" style="margin-top: 20px;">
+                    <h3>Add New Panel</h3>
+                    <div class="form-group">
+                        <label>Panel Name:</label>
+                        <input type="text" id="newPanelName" placeholder="My Panel">
+                    </div>
+                    <div class="form-group">
+                        <label>Panel URL:</label>
+                        <input type="text" id="newPanelUrl" placeholder="https://panel.example.com">
+                    </div>
+                    <div class="form-group">
+                        <label>API Key:</label>
+                        <input type="password" id="newPanelApiKey" placeholder="ptlc_...">
+                    </div>
+                    <button onclick="window.app.addNewPanel()" class="primary">Add Panel</button>
+                </div>
+            </div>
+        </div>
     </div>
     
     <!-- File Upload Input (hidden) -->

@@ -168,13 +168,13 @@ html, body {
     gap: 20px;
 }
 
-.server-selector {
+.panel-selector, .server-selector {
     display: flex;
     align-items: center;
     gap: 8px;
 }
 
-#serverDropdown {
+#panelDropdown, #serverDropdown {
     background: var(--bg-secondary);
     color: var(--text-primary);
     border: 1px solid var(--bg-tertiary);
@@ -182,15 +182,15 @@ html, body {
     padding: 6px 12px;
     font-size: 14px;
     cursor: pointer;
-    min-width: 150px;
-    max-width: 250px;
+    min-width: 120px;
+    max-width: 200px;
 }
 
-#serverDropdown:hover {
+#panelDropdown:hover, #serverDropdown:hover {
     background: var(--bg-tertiary);
 }
 
-.btn-refresh {
+.btn-refresh, .btn-manage {
     background: var(--bg-secondary);
     border: 1px solid var(--bg-tertiary);
     border-radius: 4px;
@@ -202,8 +202,67 @@ html, body {
     justify-content: center;
 }
 
-.btn-refresh:hover {
+.btn-refresh:hover, .btn-manage:hover {
     background: var(--bg-tertiary);
+}
+
+/* Panel List Styles */
+.panel-list {
+    max-height: 300px;
+    overflow-y: auto;
+    border: 1px solid var(--bg-tertiary);
+    border-radius: 4px;
+    margin-bottom: 16px;
+}
+
+.panel-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px;
+    border-bottom: 1px solid var(--bg-tertiary);
+    transition: background 0.2s;
+}
+
+.panel-item:last-child {
+    border-bottom: none;
+}
+
+.panel-item:hover {
+    background: var(--bg-tertiary);
+}
+
+.panel-item.active {
+    background: var(--accent);
+    color: white;
+}
+
+.panel-info {
+    flex: 1;
+}
+
+.panel-name {
+    font-weight: 600;
+    margin-bottom: 4px;
+}
+
+.panel-url {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.panel-item.active .panel-url {
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.panel-actions {
+    display: flex;
+    gap: 8px;
+}
+
+.panel-actions button {
+    padding: 4px 8px;
+    font-size: 12px;
 }
 
 .status-dot.connected { background: var(--success); }
