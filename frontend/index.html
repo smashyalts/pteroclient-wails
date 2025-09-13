@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
     <title>Pterodactyl Manager</title>
     <link rel="stylesheet" href="./src/style.css">
+    <!-- Monaco Editor CSS -->
+    <link rel="stylesheet" data-name="vs/editor/editor.main" href="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/editor/editor.main.min.css">
     <style>
         /* Enhanced file manager styles */
         .file-manager {
@@ -275,27 +277,13 @@
                     <div class="editor-actions">
                         <button onclick="window.app.saveFile()" id="saveBtn" style="display:none;">Save</button>
                         <button onclick="window.app.saveAllFiles()" id="saveAllBtn" style="display:none;">Save All</button>
+                        <button onclick="window.app.formatDocument && window.app.formatDocument()" id="formatBtn" style="display:none;">Format</button>
                         <button onclick="window.app.closeFile()" id="closeBtn" style="display:none;">Close</button>
                     </div>
                 </div>
                 
-                <div id="editor">
-                    <div class="welcome-screen">
-                        <h2>Welcome to Pterodactyl Manager</h2>
-                        <p>Select a file from the file tree to edit</p>
-                        <p>Or create a new file</p>
-                        
-                        <div style="margin-top: 40px;">
-                            <h3>Keyboard Shortcuts</h3>
-                            <ul style="list-style: none; padding: 0; text-align: left;">
-                                <li>Ctrl+S - Save current file</li>
-                                <li>Ctrl+Shift+S - Save all files</li>
-                                <li>Ctrl+W - Close current file</li>
-                                <li>Ctrl+N - New file</li>
-                                <li>Ctrl+O - Open file</li>
-                            </ul>
-                        </div>
-                    </div>
+                <div id="editor" style="height: 100%; width: 100%;">
+                    <!-- Monaco Editor will be inserted here -->
                 </div>
                 
                 <div class="status-bar">
@@ -384,6 +372,11 @@
     <!-- File Upload Input (hidden) -->
     <input type="file" id="fileInput" style="display: none;" multiple>
     
+    <!-- Load main editor script first -->
     <script src="./main-editor.js"></script>
+    <!-- Load Monaco Editor -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
+    <!-- Load the Monaco integration script -->
+    <script src="monaco-integrated.js"></script>
 </body>
 </html>

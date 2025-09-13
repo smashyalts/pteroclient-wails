@@ -45,6 +45,21 @@ func (a *App) startup(ctx context.Context) {
 func (a *App) Connect() error {
 	cfg := a.config.GetConfig()
 	
+	// Validate panel URL
+	if cfg.PanelURL == "" {
+		return fmt.Errorf("panel URL is empty")
+	}
+	
+	// Ensure URL has protocol
+	panelURL := cfg.PanelURL
+	if !strings.HasPrefix(panelURL, "http://") && !strings.HasPrefix(panelURL, "https://") {
+		// Default to https if no protocol specified
+		panelURL = "https://" + panelURL
+	}
+	
+	// Log for debugging
+	runtime.LogInfo(a.ctx, fmt.Sprintf("Connecting to panel: %s", panelURL))
+	
 	// Create client with empty server ID initially if not set
 	serverID := cfg.ServerID
 	if serverID == "" {
@@ -52,7 +67,7 @@ func (a *App) Connect() error {
 		serverID = ""
 	}
 	
-	a.client = pterodactyl.NewClient(cfg.PanelURL, cfg.APIKey, serverID)
+	a.client = pterodactyl.NewClient(panelURL, cfg.APIKey, serverID)
 	
 	// If no server ID, just test API connection without server-specific call
 	if serverID != "" {

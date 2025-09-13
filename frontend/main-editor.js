@@ -147,7 +147,16 @@ function initApp() {
             this.setupEditor();
             this.setupEventListeners();
             this.setupKeyboardShortcuts();
+            this.setupMonacoButton();
             await this.checkConfig();
+        },
+        
+        setupMonacoButton() {
+            // Add method to open Monaco Editor
+            this.openMonacoEditor = function() {
+                console.log('Opening Monaco Editor...');
+                window.location.href = 'monaco-editor.html';
+            };
         },
         
         setupEditor() {

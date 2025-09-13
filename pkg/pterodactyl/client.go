@@ -18,6 +18,7 @@ type Client struct {
 	baseURL   string
 	apiKey    string
 	serverID  string
+	isAdmin   bool // Track if this is an admin API key
 }
 
 // FileAttributes represents the attributes of a file or directory
@@ -85,6 +86,7 @@ type DeleteRequest struct {
 // ServerAttributes represents server attributes from the API
 type ServerAttributes struct {
 	UUID        string `json:"uuid"`
+	Identifier  string `json:"identifier"` // Admin API uses identifier
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	IsOwner     bool   `json:"is_owner"`
@@ -120,12 +122,41 @@ func NewClient(baseURL, apiKey, serverID string) *Client {
 	client.SetHeader("Accept", "application/json")
 	client.SetHeader("Content-Type", "application/json")
 
-	return &Client{
+	c := &Client{
 		client:   client,
 		baseURL:  strings.TrimSuffix(baseURL, "/"),
 		apiKey:   apiKey,
 		serverID: serverID,
 	}
+	
+	// Auto-detect if this is an admin API key
+	c.detectAPIType()
+	
+	return c
+}
+
+// detectAPIType attempts to detect if this is an admin or client API key
+func (c *Client) detectAPIType() {
+	// Try client API first (most common)
+	clientEndpoint := fmt.Sprintf("%s/api/client", c.baseURL)
+	resp, err := c.client.R().Get(clientEndpoint)
+	
+	if err == nil && resp.StatusCode() == http.StatusOK {
+		c.isAdmin = false
+		return
+	}
+	
+	// Try admin API
+	adminEndpoint := fmt.Sprintf("%s/api/application/users", c.baseURL)
+	resp, err = c.client.R().Get(adminEndpoint)
+	
+	if err == nil && resp.StatusCode() == http.StatusOK {
+		c.isAdmin = true
+		return
+	}
+	
+	// Default to client API
+	c.isAdmin = false
 }
 
 // SetServerID changes the active server ID
@@ -135,6 +166,14 @@ func (c *Client) SetServerID(serverID string) {
 
 // ListServers lists all servers the user has access to
 func (c *Client) ListServers() ([]ServerInfo, error) {
+	if c.isAdmin {
+		return c.listServersAdmin()
+	}
+	return c.listServersClient()
+}
+
+// listServersClient lists servers using client API
+func (c *Client) listServersClient() ([]ServerInfo, error) {
 	endpoint := fmt.Sprintf("%s/api/client", c.baseURL)
 	
 	resp, err := c.client.R().
@@ -166,8 +205,60 @@ func (c *Client) ListServers() ([]ServerInfo, error) {
 	return servers, nil
 }
 
+// listServersAdmin lists servers using admin API
+func (c *Client) listServersAdmin() ([]ServerInfo, error) {
+	endpoint := fmt.Sprintf("%s/api/application/servers", c.baseURL)
+	
+	// Admin API requires pagination parameters
+	resp, err := c.client.R().
+		SetQueryParam("per_page", "100").
+		Get(endpoint)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to list servers: %w", err)
+	}
+
+	if resp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode(), resp.String())
+	}
+
+	// Parse admin API response
+	var adminResp struct {
+		Data []struct {
+			Attributes struct {
+				Identifier  string `json:"identifier"`
+				UUID        string `json:"uuid"`
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+	
+	if err := json.Unmarshal(resp.Body(), &adminResp); err != nil {
+		return nil, fmt.Errorf("failed to parse admin response: %w", err)
+	}
+	
+	// Convert to ServerInfo
+	servers := make([]ServerInfo, len(adminResp.Data))
+	for i, obj := range adminResp.Data {
+		servers[i] = ServerInfo{
+			ID:          obj.Attributes.Identifier, // Admin API uses identifier
+			Name:        obj.Attributes.Name,
+			Description: obj.Attributes.Description,
+			IsOwner:     true, // Admins own all servers
+		}
+	}
+	
+	return servers, nil
+}
+
 // ListFiles lists files in a directory
 func (c *Client) ListFiles(path string) ([]FileInfo, error) {
+	// Admin API doesn't have direct file access, only client API does
+	if c.isAdmin {
+		return nil, fmt.Errorf("file operations require client API access, not admin API")
+	}
+	
 	encodedPath := url.QueryEscape(path)
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/list?directory=%s", c.baseURL, c.serverID, encodedPath)
 	
@@ -206,6 +297,11 @@ func (c *Client) ListFiles(path string) ([]FileInfo, error) {
 
 // GetFileContent retrieves the content of a file
 func (c *Client) GetFileContent(path string) (string, error) {
+	// Admin API doesn't have direct file access
+	if c.isAdmin {
+		return "", fmt.Errorf("file operations require client API access, not admin API")
+	}
+	
 	encodedPath := url.QueryEscape(path)
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/contents?file=%s", c.baseURL, c.serverID, encodedPath)
 	
@@ -395,7 +491,15 @@ func (c *Client) UploadFile(path string, filename string, content io.Reader) err
 
 // TestConnection tests if the API connection is working
 func (c *Client) TestConnection() error {
-	endpoint := fmt.Sprintf("%s/api/client/servers/%s", c.baseURL, c.serverID)
+	var endpoint string
+	
+	if c.isAdmin {
+		// For admin API, test with servers endpoint
+		endpoint = fmt.Sprintf("%s/api/application/servers/%s", c.baseURL, c.serverID)
+	} else {
+		// For client API, use the standard endpoint
+		endpoint = fmt.Sprintf("%s/api/client/servers/%s", c.baseURL, c.serverID)
+	}
 	
 	resp, err := c.client.R().Get(endpoint)
 	if err != nil {
