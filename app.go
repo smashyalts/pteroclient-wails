@@ -143,6 +143,91 @@ func (a *App) SwitchServer(serverID string) error {
 	return nil
 }
 
+// ListFilesFromServer lists files from a specific server without switching active server
+func (a *App) ListFilesFromServer(serverID string, path string) ([]map[string]interface{}, error) {
+	if a.client == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+	
+	// Store current server ID
+	currentServerID := a.client.GetServerID()
+	
+	// Temporarily switch to requested server
+	a.client.SetServerID(serverID)
+	
+	// Get files
+	files, err := a.client.ListFiles(path)
+	
+	// Restore original server ID
+	a.client.SetServerID(currentServerID)
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	// Convert to map format
+	result := make([]map[string]interface{}, len(files))
+	for i, f := range files {
+		result[i] = map[string]interface{}{
+			"name":      f.Name,
+			"size":      f.Size,
+			"mode":      f.Mode,
+			"modTime":   f.ModifiedAt,
+			"isDir":     !f.IsFile && !f.IsSymlink,
+			"isFile":    f.IsFile,
+			"isSymlink": f.IsSymlink,
+		}
+	}
+	
+	return result, nil
+}
+
+// GetFileContentFromServer gets file content from a specific server without switching active server
+func (a *App) GetFileContentFromServer(serverID string, path string) (string, error) {
+	if a.client == nil {
+		return "", fmt.Errorf("not connected")
+	}
+	
+	// Store current server ID
+	currentServerID := a.client.GetServerID()
+	
+	// Temporarily switch to requested server
+	a.client.SetServerID(serverID)
+	
+	// Get file content
+	content, err := a.client.GetFileContent(path)
+	
+	// Restore original server ID
+	a.client.SetServerID(currentServerID)
+	
+	if err != nil {
+		return "", err
+	}
+	
+	return content, nil
+}
+
+// SaveFileContentToServer saves file content to a specific server without switching active server
+func (a *App) SaveFileContentToServer(serverID string, path string, content string) error {
+	if a.client == nil {
+		return fmt.Errorf("not connected")
+	}
+	
+	// Store current server ID
+	currentServerID := a.client.GetServerID()
+	
+	// Temporarily switch to requested server
+	a.client.SetServerID(serverID)
+	
+	// Save file content
+	err := a.client.SaveFileContent(path, content)
+	
+	// Restore original server ID
+	a.client.SetServerID(currentServerID)
+	
+	return err
+}
+
 // Panel Management Methods
 
 // ListPanels returns the names of all configured panels

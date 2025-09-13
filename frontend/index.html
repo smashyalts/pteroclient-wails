@@ -258,6 +258,7 @@
             <button onclick="window.app.newFolder()">New Folder</button>
             <button onclick="window.app.newFile()">New File</button>
             <button onclick="window.app.deleteSelected()" class="danger">Delete</button>
+            <button id="splitViewBtn" style="background: #10b981; margin-left: 10px;" title="Toggle Split View">⬌ Split View</button>
             <div class="path-bar">
                 <span>Path:</span>
                 <input type="text" id="currentPath" value="/" readonly>
@@ -378,5 +379,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
     <!-- Load the Monaco integration script -->
     <script src="monaco-integrated.js"></script>
+    <!-- Load integrated split view -->
+    <script src="integrated-split.js"></script>
 </body>
 </html>

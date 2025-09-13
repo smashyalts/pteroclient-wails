@@ -498,6 +498,33 @@ function initApp() {
                 ? '/' + file.name 
                 : this.currentPath + '/' + file.name;
             
+            // Check if split view is active
+            if (window.splitView && window.splitView.isActive) {
+                // If file is already open in main tabs, use that content
+                let content;
+                if (this.openFiles.has(filePath)) {
+                    content = this.openFiles.get(filePath).content;
+                } else {
+                    try {
+                        content = await window.go.main.App.GetFileContent(filePath);
+                        // Also add to main open files
+                        this.openFiles.set(filePath, {
+                            name: file.name,
+                            content: content,
+                            originalContent: content,
+                            modified: false
+                        });
+                    } catch (err) {
+                        alert('Failed to open file: ' + err);
+                        return;
+                    }
+                }
+                
+                // Open in the active split pane
+                window.splitView.openFileInPane(filePath, content);
+                return;
+            }
+            
             // Check if already open
             if (this.openFiles.has(filePath)) {
                 this.switchToFile(filePath);

@@ -164,6 +164,11 @@ func (c *Client) SetServerID(serverID string) {
 	c.serverID = serverID
 }
 
+// GetServerID returns the current server ID
+func (c *Client) GetServerID() string {
+	return c.serverID
+}
+
 // ListServers lists all servers the user has access to
 func (c *Client) ListServers() ([]ServerInfo, error) {
 	if c.isAdmin {

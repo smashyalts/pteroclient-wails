@@ -46,6 +46,14 @@ function loadMonacoEditor() {
         console.log('Monaco loaded, defining themes...');
         defineCustomThemes();
         enhanceApp();
+        
+        // Initialize split view after Monaco is loaded
+        if (window.IntegratedSplitView) {
+            window.splitView = new window.IntegratedSplitView();
+            if (window.app) {
+                window.splitView.init(window.app);
+            }
+        }
     });
 }
 

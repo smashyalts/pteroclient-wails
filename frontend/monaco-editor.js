@@ -374,6 +374,19 @@ function initAdvancedApp() {
             const div = document.createElement('div');
             div.className = 'file-item';
             
+            // Store file path as data attribute for tracking
+            if (!isParent && !file.isDir) {
+                const filePath = this.currentPath === '/' 
+                    ? '/' + file.name 
+                    : this.currentPath + '/' + file.name;
+                div.dataset.filepath = filePath;
+                
+                // Check if this file is currently open and mark as selected
+                if (this.openFiles.has(filePath)) {
+                    div.classList.add('selected');
+                }
+            }
+            
             const icon = document.createElement('span');
             icon.className = 'file-icon';
             icon.textContent = file.isDir ? '📁' : this.getFileIcon(file.name);
@@ -402,6 +415,7 @@ function initAdvancedApp() {
                         : this.currentPath + '/' + file.name;
                     this.loadFiles(newPath);
                 } else {
+                    // Update selection state
                     document.querySelectorAll('.file-item').forEach(item => {
                         item.classList.remove('selected');
                     });
@@ -510,6 +524,13 @@ function initAdvancedApp() {
             // Update tabs
             document.querySelectorAll('.editor-tab').forEach(tab => {
                 tab.classList.toggle('active', tab.dataset.path === path);
+            });
+            
+            // Update file selection in sidebar
+            document.querySelectorAll('.file-item').forEach(item => {
+                if (item.dataset.filepath) {
+                    item.classList.toggle('selected', item.dataset.filepath === path);
+                }
             });
             
             // Set model
@@ -626,6 +647,12 @@ function initAdvancedApp() {
             // Remove tab
             const tab = document.querySelector(`.editor-tab[data-path="${path}"]`);
             if (tab) tab.remove();
+            
+            // Update file item selection state in sidebar
+            const fileItem = document.querySelector(`.file-item[data-filepath="${path}"]`);
+            if (fileItem) {
+                fileItem.classList.remove('selected');
+            }
             
             // Switch to another file or clear
             if (this.activeFile === path) {
