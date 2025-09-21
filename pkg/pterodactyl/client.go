@@ -106,8 +106,11 @@ type ListServersResponse struct {
 }
 
 // ServerInfo represents simplified server information
+// ID is always the short server identifier (identifier) used by client endpoints
+// UUID is provided for reference when needed
 type ServerInfo struct {
 	ID          string `json:"id"`
+	UUID        string `json:"uuid,omitempty"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
 	IsOwner     bool   `json:"is_owner"`
@@ -137,25 +140,18 @@ func NewClient(baseURL, apiKey, serverID string) *Client {
 
 // detectAPIType attempts to detect if this is an admin or client API key
 func (c *Client) detectAPIType() {
-	// Try client API first (most common)
-	clientEndpoint := fmt.Sprintf("%s/api/client", c.baseURL)
-	resp, err := c.client.R().Get(clientEndpoint)
-	
-	if err == nil && resp.StatusCode() == http.StatusOK {
-		c.isAdmin = false
-		return
-	}
-	
-	// Try admin API
-	adminEndpoint := fmt.Sprintf("%s/api/application/users", c.baseURL)
-	resp, err = c.client.R().Get(adminEndpoint)
+	// Try admin API first - check if we can list all servers
+	adminEndpoint := fmt.Sprintf("%s/api/application/servers", c.baseURL)
+	resp, err := c.client.R().
+		SetQueryParam("per_page", "1").
+		Get(adminEndpoint)
 	
 	if err == nil && resp.StatusCode() == http.StatusOK {
 		c.isAdmin = true
 		return
 	}
 	
-	// Default to client API
+	// Not admin, must be client API
 	c.isAdmin = false
 }
 
@@ -164,9 +160,27 @@ func (c *Client) SetServerID(serverID string) {
 	c.serverID = serverID
 }
 
+// Close closes all HTTP connections
+func (c *Client) Close() {
+	// This forces the resty client to close all connections
+	if c.client != nil {
+		c.client.GetClient().CloseIdleConnections()
+	}
+}
+
 // GetServerID returns the current server ID
 func (c *Client) GetServerID() string {
 	return c.serverID
+}
+
+// GetBaseURL returns the base URL for debugging
+func (c *Client) GetBaseURL() string {
+	return c.baseURL
+}
+
+// IsAdmin returns whether this client is using admin API
+func (c *Client) IsAdmin() bool {
+	return c.isAdmin
 }
 
 // ListServers lists all servers the user has access to
@@ -199,7 +213,8 @@ func (c *Client) listServersClient() ([]ServerInfo, error) {
 	servers := make([]ServerInfo, len(result.Data))
 	for i, obj := range result.Data {
 		servers[i] = ServerInfo{
-			ID:          obj.Attributes.UUID,
+			ID:          obj.Attributes.UUID, // Client API returns UUID as the identifier
+			UUID:        obj.Attributes.UUID,
 			Name:        obj.Attributes.Name,
 			Description: obj.Attributes.Description,
 			IsOwner:     obj.Attributes.IsOwner,
@@ -248,6 +263,7 @@ func (c *Client) listServersAdmin() ([]ServerInfo, error) {
 	for i, obj := range adminResp.Data {
 		servers[i] = ServerInfo{
 			ID:          obj.Attributes.Identifier, // Admin API uses identifier
+			UUID:        obj.Attributes.UUID,       // Store UUID separately for file operations
 			Name:        obj.Attributes.Name,
 			Description: obj.Attributes.Description,
 			IsOwner:     true, // Admins own all servers
@@ -259,11 +275,7 @@ func (c *Client) listServersAdmin() ([]ServerInfo, error) {
 
 // ListFiles lists files in a directory
 func (c *Client) ListFiles(path string) ([]FileInfo, error) {
-	// Admin API doesn't have direct file access, only client API does
-	if c.isAdmin {
-		return nil, fmt.Errorf("file operations require client API access, not admin API")
-	}
-	
+	// Note: Admin API keys can also access client endpoints
 	encodedPath := url.QueryEscape(path)
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/list?directory=%s", c.baseURL, c.serverID, encodedPath)
 	
@@ -302,11 +314,7 @@ func (c *Client) ListFiles(path string) ([]FileInfo, error) {
 
 // GetFileContent retrieves the content of a file
 func (c *Client) GetFileContent(path string) (string, error) {
-	// Admin API doesn't have direct file access
-	if c.isAdmin {
-		return "", fmt.Errorf("file operations require client API access, not admin API")
-	}
-	
+	// Note: Admin API keys can also access client endpoints
 	encodedPath := url.QueryEscape(path)
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/contents?file=%s", c.baseURL, c.serverID, encodedPath)
 	

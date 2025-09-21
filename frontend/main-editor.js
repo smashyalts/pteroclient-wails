@@ -136,6 +136,11 @@ function initApp() {
         isConnected: false,
         consoleConnected: false,
         
+        // Navigation history
+        navigationHistory: [],
+        navigationIndex: -1,
+        isNavigating: false,
+        
         // Editor state
         editor: null,
         openFiles: new Map(), // path -> {content, modified, originalContent}
@@ -147,16 +152,94 @@ function initApp() {
             this.setupEditor();
             this.setupEventListeners();
             this.setupKeyboardShortcuts();
-            this.setupMonacoButton();
+            this.setupMouseNavigation();
             await this.checkConfig();
         },
         
-        setupMonacoButton() {
-            // Add method to open Monaco Editor
-            this.openMonacoEditor = function() {
-                console.log('Opening Monaco Editor...');
-                window.location.href = 'monaco-editor.html';
-            };
+        
+        setupMouseNavigation() {
+            // Mouse button 4 (back) and 5 (forward) navigation
+            document.addEventListener('mousedown', (e) => {
+                // Check if we're in the file tree area
+                const fileTree = document.getElementById('fileTree');
+                const isInFileArea = fileTree && (fileTree.contains(e.target) || 
+                                    e.target.closest('.file-manager') || 
+                                    e.target.closest('.toolbar'));
+                
+                if (isInFileArea) {
+                    if (e.button === 3) { // Mouse button 4 (back)
+                        e.preventDefault();
+                        this.navigateBack();
+                    } else if (e.button === 4) { // Mouse button 5 (forward)
+                        e.preventDefault();
+                        this.navigateForward();
+                    }
+                }
+            });
+            
+            // Prevent context menu on mouse buttons 4 and 5
+            document.addEventListener('auxclick', (e) => {
+                if (e.button === 1 || e.button === 2) return; // Allow middle and right click
+                
+                const fileTree = document.getElementById('fileTree');
+                const isInFileArea = fileTree && (fileTree.contains(e.target) || 
+                                    e.target.closest('.file-manager') || 
+                                    e.target.closest('.toolbar'));
+                
+                if (isInFileArea && (e.button === 3 || e.button === 4)) {
+                    e.preventDefault();
+                }
+            });
+        },
+        
+        navigateBack() {
+            if (this.navigationIndex > 0) {
+                this.navigationIndex--;
+                this.isNavigating = true;
+                const targetPath = this.navigationHistory[this.navigationIndex];
+                console.log('Navigating back to:', targetPath);
+                this.loadFiles(targetPath);
+            }
+        },
+        
+        navigateForward() {
+            if (this.navigationIndex < this.navigationHistory.length - 1) {
+                this.navigationIndex++;
+                this.isNavigating = true;
+                const targetPath = this.navigationHistory[this.navigationIndex];
+                console.log('Navigating forward to:', targetPath);
+                this.loadFiles(targetPath);
+            }
+        },
+        
+        addToHistory(path) {
+            // Don't add to history if we're navigating via history
+            if (this.isNavigating) {
+                this.isNavigating = false;
+                return;
+            }
+            
+            // If we're not at the end of history, remove everything after current index
+            if (this.navigationIndex < this.navigationHistory.length - 1) {
+                this.navigationHistory = this.navigationHistory.slice(0, this.navigationIndex + 1);
+            }
+            
+            // Don't add duplicate of current path
+            if (this.navigationHistory[this.navigationIndex] === path) {
+                return;
+            }
+            
+            // Add new path to history
+            this.navigationHistory.push(path);
+            this.navigationIndex = this.navigationHistory.length - 1;
+            
+            // Limit history to 50 items
+            if (this.navigationHistory.length > 50) {
+                this.navigationHistory.shift();
+                this.navigationIndex--;
+            }
+            
+            console.log('Navigation history:', this.navigationHistory, 'Index:', this.navigationIndex);
         },
         
         setupEditor() {
@@ -192,6 +275,16 @@ function initApp() {
                 if (e.ctrlKey && e.key === 'n') {
                     e.preventDefault();
                     this.newFile();
+                }
+                // Alt+Left - Navigate back
+                if (e.altKey && e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    this.navigateBack();
+                }
+                // Alt+Right - Navigate forward
+                if (e.altKey && e.key === 'ArrowRight') {
+                    e.preventDefault();
+                    this.navigateForward();
                 }
             });
         },
@@ -229,11 +322,28 @@ function initApp() {
             
             window.runtime.EventsOn('server-changed', (serverID) => {
                 console.log('Server changed to:', serverID);
+                // Reset path and history when server changes
+                this.currentPath = '/';
+                this.navigationHistory = ['/'];
+                this.navigationIndex = 0;
                 this.appendConsole('=== Switched to server: ' + serverID + ' ===', 'info');
                 // Clear console and reload files for the new server
                 this.clearConsole();
                 this.loadFiles('/');
                 // Close all open files as they belong to the previous server
+                this.closeAllFiles();
+            });
+            
+            window.runtime.EventsOn('panel-changed', (panelName) => {
+                console.log('Panel changed to:', panelName);
+                // Reset path and history when panel changes
+                this.currentPath = '/';
+                this.navigationHistory = ['/'];
+                this.navigationIndex = 0;
+                this.appendConsole('=== Switched to panel: ' + panelName + ' ===', 'info');
+                // Reload files for the new panel
+                this.loadFiles('/');
+                // Close all open files as they belong to the previous panel
                 this.closeAllFiles();
             });
             
@@ -369,7 +479,14 @@ function initApp() {
             }
             
             console.log('Loading files from:', path);
+            // Ensure path is never undefined
+            if (path === undefined || path === null || path === '') {
+                path = '/';
+            }
             this.currentPath = path;
+            
+            // Add to navigation history
+            this.addToHistory(path);
             
             const pathInput = document.getElementById('currentPath');
             if (pathInput) pathInput.value = path;
@@ -494,9 +611,11 @@ function initApp() {
                 await this.saveFile();
             }
             
-            const filePath = this.currentPath === '/' 
+            // Ensure currentPath is valid
+            const safePath = this.currentPath || '/';
+            const filePath = safePath === '/' 
                 ? '/' + file.name 
-                : this.currentPath + '/' + file.name;
+                : safePath + '/' + file.name;
             
             // Check if split view is active
             if (window.splitView && window.splitView.isActive) {

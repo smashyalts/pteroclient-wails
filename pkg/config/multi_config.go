@@ -9,10 +9,11 @@ import (
 
 // PanelConfig represents configuration for a single panel
 type PanelConfig struct {
-	Name     string `json:"name"`
-	PanelURL string `json:"panel_url"`
-	APIKey   string `json:"api_key"`
-	ServerID string `json:"server_id,omitempty"`
+	Name      string `json:"name"`
+	PanelURL  string `json:"panel_url"`
+	APIKey    string `json:"api_key"`
+	AdminKey  string `json:"admin_key,omitempty"` // Optional admin API key for listing all servers
+	ServerID  string `json:"server_id,omitempty"`
 }
 
 // MultiConfig represents the multi-panel configuration

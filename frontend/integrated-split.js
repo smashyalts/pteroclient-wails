@@ -21,6 +21,11 @@ class IntegratedSplitView {
         this.dragStartX = 0;
         this.dragStartY = 0;
         this.dragStartRatio = 0.5;
+        
+        // Navigation history for each pane
+        this.navigationHistory = new Map();
+        this.navigationHistory.set(1, { history: ['/'], currentIndex: 0 });
+        this.navigationHistory.set(2, { history: ['/'], currentIndex: 0 });
     }
     
     init(app) {
@@ -910,6 +915,9 @@ class IntegratedSplitView {
         pane.appendChild(fileTreeContainer);
         pane.appendChild(editorContainer);
         
+        // Setup mouse navigation for this pane's file tree
+        this.setupMouseNavigation(fileTreeContainer, paneNum);
+        
         return pane;
     }
     
@@ -1040,7 +1048,7 @@ class IntegratedSplitView {
         }
     }
     
-    async loadPaneFiles(paneNum, path) {
+    async loadPaneFiles(paneNum, path, addToHistory = true) {
         const fileTree = document.getElementById(`fileTree${paneNum}`);
         if (!fileTree) return;
         
@@ -1061,6 +1069,14 @@ class IntegratedSplitView {
             }
             
             this.renderPaneFiles(paneNum, files || [], path);
+            
+            // Update navigation history
+            if (addToHistory) {
+                this.addToNavigationHistory(paneNum, path);
+            }
+            
+            // Update navigation button states (if they exist)
+            this.updateNavigationButtons(paneNum);
         } catch (err) {
             fileTree.innerHTML = `<div class="error">Failed to load files: ${err}</div>`;
         }
@@ -1125,10 +1141,10 @@ class IntegratedSplitView {
                 const parts = currentPath.split('/').filter(p => p);
                 parts.pop();
                 const parentPath = '/' + parts.join('/');
-                await this.loadPaneFiles(paneNum, parentPath || '/');
+                await this.loadPaneFiles(paneNum, parentPath || '/', true);
             } else if (file.isDir) {
                 const newPath = currentPath === '/' ? '/' + file.name : currentPath + '/' + file.name;
-                await this.loadPaneFiles(paneNum, newPath);
+                await this.loadPaneFiles(paneNum, newPath, true);
             } else {
                 // Open file
                 const filePath = currentPath === '/' ? '/' + file.name : currentPath + '/' + file.name;
@@ -1204,6 +1220,96 @@ class IntegratedSplitView {
                 splitter.style.cursor = 'row-resize';
             }
         }
+    }
+    
+    // Navigation history methods
+    addToNavigationHistory(paneNum, path) {
+        const nav = this.navigationHistory.get(paneNum);
+        if (!nav) return;
+        
+        // If we're not at the end of history, remove everything after current index
+        if (nav.currentIndex < nav.history.length - 1) {
+            nav.history = nav.history.slice(0, nav.currentIndex + 1);
+        }
+        
+        // Add new path if it's different from current
+        if (nav.history[nav.currentIndex] !== path) {
+            nav.history.push(path);
+            nav.currentIndex++;
+            
+            // Limit history to 50 items
+            if (nav.history.length > 50) {
+                nav.history.shift();
+                nav.currentIndex--;
+            }
+        }
+    }
+    
+    async navigateBack(paneNum) {
+        const nav = this.navigationHistory.get(paneNum);
+        if (!nav || nav.currentIndex <= 0) return;
+        
+        nav.currentIndex--;
+        const path = nav.history[nav.currentIndex];
+        await this.loadPaneFiles(paneNum, path, false);
+    }
+    
+    async navigateForward(paneNum) {
+        const nav = this.navigationHistory.get(paneNum);
+        if (!nav || nav.currentIndex >= nav.history.length - 1) return;
+        
+        nav.currentIndex++;
+        const path = nav.history[nav.currentIndex];
+        await this.loadPaneFiles(paneNum, path, false);
+    }
+    
+    updateNavigationButtons(paneNum) {
+        const nav = this.navigationHistory.get(paneNum);
+        if (!nav) return;
+        
+        // This can be used to update navigation buttons if they exist in the UI
+        const backBtn = document.getElementById(`pane${paneNum}BackBtn`);
+        const forwardBtn = document.getElementById(`pane${paneNum}ForwardBtn`);
+        
+        if (backBtn) {
+            backBtn.disabled = nav.currentIndex <= 0;
+            backBtn.style.opacity = backBtn.disabled ? '0.5' : '1';
+        }
+        
+        if (forwardBtn) {
+            forwardBtn.disabled = nav.currentIndex >= nav.history.length - 1;
+            forwardBtn.style.opacity = forwardBtn.disabled ? '0.5' : '1';
+        }
+    }
+    
+    setupMouseNavigation(container, paneNum) {
+        // Listen for mouse button 4 (back) and 5 (forward)
+        container.addEventListener('mousedown', async (e) => {
+            // Mouse button 3 is back (some browsers)
+            if (e.button === 3) {
+                e.preventDefault();
+                await this.navigateBack(paneNum);
+            }
+            // Mouse button 4 is forward (some browsers)
+            else if (e.button === 4) {
+                e.preventDefault();
+                await this.navigateForward(paneNum);
+            }
+        });
+        
+        // Also handle auxclick for mouse buttons 4 and 5
+        container.addEventListener('auxclick', async (e) => {
+            // Prevent default middle-click behavior
+            e.preventDefault();
+            
+            // Note: Browser support varies - test needed to confirm button mapping
+            // Typically button 3 = back, button 4 = forward
+            if (e.button === 3) {
+                await this.navigateBack(paneNum);
+            } else if (e.button === 4) {
+                await this.navigateForward(paneNum);
+            }
+        });
     }
 }
 
