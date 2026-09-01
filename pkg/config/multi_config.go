@@ -161,7 +161,19 @@ func (mcm *MultiConfigManager) AddOrUpdatePanel(panel PanelConfig) error {
 	// Check if panel with same name exists
 	for i, p := range mcm.config.Panels {
 		if p.Name == panel.Name {
-			// Update existing panel
+			// Update, not replace. Assigning the incoming struct wholesale
+			// dropped whatever the caller left blank — which meant re-saving a
+			// panel to correct its URL also forgot which server was selected.
+			// Blank means "keep"; ClearAdminKey is how one is removed.
+			if panel.APIKey == "" {
+				panel.APIKey = p.APIKey
+			}
+			if panel.AdminKey == "" {
+				panel.AdminKey = p.AdminKey
+			}
+			if panel.ServerID == "" {
+				panel.ServerID = p.ServerID
+			}
 			mcm.config.Panels[i] = panel
 			return mcm.Save()
 		}
@@ -175,6 +187,30 @@ func (mcm *MultiConfigManager) AddOrUpdatePanel(panel PanelConfig) error {
 		mcm.config.ActivePanel = panel.Name
 	}
 	
+	return mcm.Save()
+}
+
+// FindPanel returns the stored panel with this name, or nil.
+func (mcm *MultiConfigManager) FindPanel(name string) *PanelConfig {
+	if mcm.config == nil {
+		return nil
+	}
+	for i := range mcm.config.Panels {
+		if mcm.config.Panels[i].Name == name {
+			return &mcm.config.Panels[i]
+		}
+	}
+	return nil
+}
+
+// ClearAdminKey drops a panel's admin key. AddOrUpdatePanel treats a blank
+// admin key as "keep the stored one", so this is the only way to remove it.
+func (mcm *MultiConfigManager) ClearAdminKey(name string) error {
+	panel := mcm.FindPanel(name)
+	if panel == nil {
+		return fmt.Errorf("panel not found: %s", name)
+	}
+	panel.AdminKey = ""
 	return mcm.Save()
 }
 

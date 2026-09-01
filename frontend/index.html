@@ -287,7 +287,7 @@
             <div class="panel-list" id="panelList"></div>
 
             <div class="settings-group">
-                <h3>Add a panel</h3>
+                <h3 id="panelFormTitle">Add a panel</h3>
                 <div class="form-group">
                     <label>Display name</label>
                     <input type="text" id="newPanelName" placeholder="Survival cluster">
@@ -297,10 +297,19 @@
                     <input type="text" class="mono" id="newPanelUrl" placeholder="https://panel.example.com">
                 </div>
                 <div class="form-group">
-                    <label>API key</label>
+                    <label>Client API key</label>
                     <input type="password" class="mono" id="newPanelApiKey" placeholder="ptlc_…">
+                    <div class="form-hint">Account settings → API Credentials. Used for files, console and power.</div>
                 </div>
-                <button onclick="window.app.addNewPanel()" class="primary" type="button">Add panel</button>
+                <div class="form-group">
+                    <label>Admin API key <span class="form-optional">optional</span></label>
+                    <input type="password" class="mono" id="newPanelAdminKey" placeholder="ptla_…">
+                    <div class="form-hint">Only for listing servers. A client key shows the servers your account
+                        owns or was added to; an admin key shows every server on the panel.</div>
+                </div>
+                <div id="panelFormEditing" class="form-hint" hidden></div>
+                <button onclick="window.app.addNewPanel()" class="primary" type="button" id="panelFormSubmit">Add panel</button>
+                <button onclick="window.app.cancelPanelEdit()" type="button" id="panelFormCancel" hidden>Cancel</button>
             </div>
         </div>
     </div>

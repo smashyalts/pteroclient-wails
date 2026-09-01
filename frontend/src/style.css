@@ -1475,3 +1475,31 @@ textarea.mono {
 .ansi.bg-105 { background-color: #e2b4f4; }
 .ansi.bg-106 { background-color: #8cc4d6; }
 .ansi.bg-107 { background-color: #ffffff; }
+
+/* Panel form hints ------------------------------------------------------- */
+
+.form-hint {
+    margin-top: 6px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-faint);
+}
+
+.form-optional {
+    margin-left: 6px;
+    font-size: 10.5px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    color: var(--text-faint);
+}
+
+.panel-tag {
+    margin-left: 7px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    background: var(--accent-dim, rgba(120, 160, 255, .14));
+    color: var(--accent);
+}

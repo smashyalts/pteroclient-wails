@@ -399,6 +399,9 @@ func (a *App) GetPanels() []map[string]interface{} {
 			"name":     p.Name,
 			"panelURL": p.PanelURL,
 			"serverID": p.ServerID,
+			// Whether one is set, never the key itself. The UI only needs to
+			// show the badge and offer to clear it.
+			"hasAdminKey": p.AdminKey != "",
 		}
 	}
 	
@@ -475,15 +478,26 @@ const ErrPanelSavedNotConnected = "panel saved, but connecting failed"
 // the servers, so the app showed a configured panel with no connection and an
 // empty server picker until the next restart — while the dialog said the panel
 // had been added successfully.
-func (a *App) AddPanel(name, panelURL, apiKey string) error {
-	if name == "" || panelURL == "" || apiKey == "" {
-		return fmt.Errorf("name, panel URL, and API key are required")
+// adminKey is optional. A client key (ptlc_) only lists servers the account
+// owns or was added to; an admin key (ptla_) lists every server on the panel,
+// and Connect keeps it on a second client used solely for that listing. Both
+// keys may be left blank when editing an existing panel, which keeps the ones
+// already stored.
+func (a *App) AddPanel(name, panelURL, apiKey, adminKey string) error {
+	if name == "" || panelURL == "" {
+		return fmt.Errorf("a display name and the panel URL are required")
+	}
+
+	// A panel being created has nothing to fall back on.
+	if a.config.FindPanel(name) == nil && apiKey == "" {
+		return fmt.Errorf("an API key is required for a new panel")
 	}
 
 	panel := config.PanelConfig{
 		Name:     name,
 		PanelURL: panelURL,
 		APIKey:   apiKey,
+		AdminKey: adminKey,
 	}
 
 	if err := a.config.AddOrUpdatePanel(panel); err != nil {
@@ -502,6 +516,22 @@ func (a *App) AddPanel(name, panelURL, apiKey string) error {
 		return fmt.Errorf("%s: %w", ErrPanelSavedNotConnected, err)
 	}
 
+	a.RefreshAllServerMappings()
+	return nil
+}
+
+// ClearPanelAdminKey drops a panel's admin key and reconnects if it is the
+// active one, so the server list falls back to what the client key can see.
+func (a *App) ClearPanelAdminKey(name string) error {
+	if err := a.config.ClearAdminKey(name); err != nil {
+		return err
+	}
+	if a.config.GetActivePanelName() != name {
+		return nil
+	}
+	if err := a.Connect(); err != nil {
+		return fmt.Errorf("%s: %w", ErrPanelSavedNotConnected, err)
+	}
 	a.RefreshAllServerMappings()
 	return nil
 }

@@ -139,6 +139,9 @@ function initApp() {
         contextFile: null,
         isConnected: false,
         consoleConnected: false,
+        // Set while the panel form is editing an existing panel rather than
+        // adding one; blank key fields then mean "keep what is stored".
+        editingPanel: null,
         
         // Navigation history
         navigationHistory: [],
@@ -1525,6 +1528,7 @@ function initApp() {
             const modal = document.getElementById('panelManagerModal');
             if (modal) {
                 modal.classList.add('show');
+                this.cancelPanelEdit();
                 await this.loadPanelList();
             }
         },
@@ -1547,18 +1551,29 @@ function initApp() {
                     return;
                 }
                 
-                listEl.innerHTML = panels.map(panel => `
-                    <div class="panel-item ${panel === activePanel ? 'active' : ''}" data-panel="${panel}">
+                // Details carry the URL and whether an admin key is set, so the
+                // row can say what it is instead of "Panel configuration".
+                const details = await window.go.main.App.GetPanels().catch(() => []);
+                const detailFor = {};
+                (details || []).forEach(d => { detailFor[d.name] = d; });
+
+                listEl.innerHTML = panels.map(panel => {
+                    const d = detailFor[panel] || {};
+                    const esc = this.escapeHtml(panel);
+                    return `
+                    <div class="panel-item ${panel === activePanel ? 'active' : ''}" data-panel="${esc}">
                         <div class="panel-info">
-                            <div class="panel-name">${panel}</div>
-                            <div class="panel-url">Panel configuration</div>
+                            <div class="panel-name">${esc}${d.hasAdminKey ? '<span class="panel-tag">admin key</span>' : ''}</div>
+                            <div class="panel-url mono">${this.escapeHtml(d.panelURL || 'no URL recorded')}</div>
                         </div>
                         <div class="panel-actions">
-                            ${panel !== activePanel ? `<button onclick="window.app.switchPanel('${panel}')">Switch</button>` : ''}
-                            <button onclick="window.app.removePanel('${panel}')" class="danger">Remove</button>
+                            ${panel !== activePanel ? `<button onclick="window.app.switchPanel('${esc}')">Switch</button>` : ''}
+                            <button onclick="window.app.editPanel('${esc}')">Edit</button>
+                            ${d.hasAdminKey ? `<button onclick="window.app.clearPanelAdminKey('${esc}')">Clear admin key</button>` : ''}
+                            <button onclick="window.app.removePanel('${esc}')" class="danger">Remove</button>
                         </div>
-                    </div>
-                `).join('');
+                    </div>`;
+                }).join('');
             } catch (err) {
                 console.error('Failed to load panel list:', err);
             }
@@ -1601,9 +1616,15 @@ function initApp() {
             const name = document.getElementById('newPanelName')?.value?.trim();
             const url = document.getElementById('newPanelUrl')?.value?.trim();
             const apiKey = document.getElementById('newPanelApiKey')?.value?.trim();
+            const adminKey = document.getElementById('newPanelAdminKey')?.value?.trim();
 
-            if (!name || !url || !apiKey) {
-                await this.say('Missing details', 'A display name, the panel URL and an API key are all required.');
+            if (!name || !url) {
+                await this.say('Missing details', 'A display name and the panel URL are both required.');
+                return;
+            }
+            // Editing an existing panel may leave the keys blank to keep them.
+            if (!apiKey && !this.editingPanel) {
+                await this.say('Missing details', 'A client API key is required for a new panel.');
                 return;
             }
 
@@ -1613,7 +1634,7 @@ function initApp() {
             // can be corrected from the list instead of retyped.
             let offlineReason = null;
             try {
-                await window.go.main.App.AddPanel(name, url, apiKey);
+                await window.go.main.App.AddPanel(name, url, apiKey, adminKey);
             } catch (err) {
                 const message = String(err);
                 if (message.indexOf('panel saved, but connecting failed') === -1) {
@@ -1624,10 +1645,7 @@ function initApp() {
                 offlineReason = message;
             }
 
-            // Clear form
-            document.getElementById('newPanelName').value = '';
-            document.getElementById('newPanelUrl').value = '';
-            document.getElementById('newPanelApiKey').value = '';
+            this.cancelPanelEdit();
 
             // Reload panel list
             await this.loadPanelList();
@@ -1659,18 +1677,84 @@ function initApp() {
             this.closePanelManager();
         },
         
-        async removePanel(panelName) {
-            if (!confirm(`Are you sure you want to remove the panel "${panelName}"?`)) {
-                return;
+        // Loads a panel back into the form. The key fields stay blank on
+        // purpose: the app never sends a stored key back to the UI, and blank
+        // means "keep it" on the way in.
+        async editPanel(panelName) {
+            const details = await window.go.main.App.GetPanels().catch(() => []);
+            const panel = (details || []).find(d => d.name === panelName);
+            if (!panel) return;
+
+            this.editingPanel = panelName;
+            document.getElementById('newPanelName').value = panel.name;
+            document.getElementById('newPanelUrl').value = panel.panelURL || '';
+            document.getElementById('newPanelApiKey').value = '';
+            document.getElementById('newPanelAdminKey').value = '';
+
+            document.getElementById('panelFormTitle').textContent = 'Edit ' + panel.name;
+            document.getElementById('panelFormSubmit').textContent = 'Save panel';
+            document.getElementById('panelFormCancel').hidden = false;
+
+            const note = document.getElementById('panelFormEditing');
+            note.hidden = false;
+            note.textContent = panel.hasAdminKey
+                ? 'Leave either key blank to keep the one already saved. This panel has an admin key set.'
+                : 'Leave the client key blank to keep the one already saved.';
+
+            document.getElementById('newPanelUrl').focus();
+        },
+
+        cancelPanelEdit() {
+            this.editingPanel = null;
+            document.getElementById('newPanelName').value = '';
+            document.getElementById('newPanelUrl').value = '';
+            document.getElementById('newPanelApiKey').value = '';
+            document.getElementById('newPanelAdminKey').value = '';
+
+            document.getElementById('panelFormTitle').textContent = 'Add a panel';
+            document.getElementById('panelFormSubmit').textContent = 'Add panel';
+            document.getElementById('panelFormCancel').hidden = true;
+            document.getElementById('panelFormEditing').hidden = true;
+        },
+
+        async clearPanelAdminKey(panelName) {
+            const ok = await this.ask('Remove the admin key',
+                'The server list for <b>' + this.escapeHtml(panelName) + '</b> falls back to what the client key can see — ' +
+                'the servers your account owns or was added to.',
+                { confirmLabel: 'Remove it' });
+            if (!ok) return;
+
+            try {
+                await window.go.main.App.ClearPanelAdminKey(panelName);
+            } catch (err) {
+                const message = String(err);
+                if (message.indexOf('panel saved, but connecting failed') === -1) {
+                    await this.say('Could not remove the admin key', message);
+                    return;
+                }
+                await this.say('Removed, but not connected', message);
             }
-            
+
+            await this.loadPanelList();
+            await this.loadServers();
+            document.dispatchEvent(new CustomEvent('shell:refresh'));
+        },
+
+        async removePanel(panelName) {
+            const ok = await this.ask('Remove panel',
+                'Remove <b>' + this.escapeHtml(panelName) + '</b> and its saved keys from this app? ' +
+                'Nothing on the panel itself changes.',
+                { danger: true, confirmLabel: 'Remove' });
+            if (!ok) return;
+
             try {
                 await window.go.main.App.RemovePanel(panelName);
+                if (this.editingPanel === panelName) this.cancelPanelEdit();
                 await this.loadPanelList();
                 await this.loadPanels();
             } catch (err) {
                 console.error('Failed to remove panel:', err);
-                alert('Failed to remove panel: ' + err);
+                await this.say('Could not remove the panel', String(err));
             }
         },
         
