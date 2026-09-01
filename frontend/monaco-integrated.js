@@ -22,23 +22,38 @@ const LANGUAGE_MAP = {
 };
 
 // Initialize Monaco
-require.config({
-    paths: {
-        'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs'
-    }
-});
+// The Monaco loader is fetched from a CDN. When that fetch fails — no
+// network, a blocked host — `require` never appears and the app falls back
+// to the built-in simple editor instead of throwing on every load.
+if (typeof require === 'undefined') {
+    console.warn('Monaco loader unavailable; using the simple editor.');
+} else {
+    require.config({
+        paths: {
+            'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs'
+        }
+    });
+}
 
-// Wait for dependencies
+// Wait for dependencies. Bounded, because when the Monaco CDN is unreachable
+// `require` never turns up and this used to poll for the life of the process.
+let dependencyAttempts = 0;
+const MAX_DEPENDENCY_ATTEMPTS = 200; // ~10s at 50ms
+
 function waitForDependencies() {
-    if (typeof window.go !== 'undefined' && 
-        typeof window.runtime !== 'undefined' && 
+    if (typeof window.go !== 'undefined' &&
+        typeof window.runtime !== 'undefined' &&
         typeof require !== 'undefined') {
         console.log('Dependencies ready, loading Monaco...');
         loadMonacoEditor();
-    } else {
-        console.log('Waiting for dependencies...');
-        setTimeout(waitForDependencies, 50);
+        return;
     }
+
+    if (++dependencyAttempts > MAX_DEPENDENCY_ATTEMPTS) {
+        console.warn('Monaco did not become available; staying on the simple editor.');
+        return;
+    }
+    setTimeout(waitForDependencies, 50);
 }
 
 function loadMonacoEditor() {
@@ -46,14 +61,6 @@ function loadMonacoEditor() {
         console.log('Monaco loaded, defining themes...');
         defineCustomThemes();
         enhanceApp();
-        
-        // Initialize split view after Monaco is loaded
-        if (window.IntegratedSplitView) {
-            window.splitView = new window.IntegratedSplitView();
-            if (window.app) {
-                window.splitView.init(window.app);
-            }
-        }
     });
 }
 

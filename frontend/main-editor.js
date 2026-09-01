@@ -448,15 +448,17 @@ function initApp() {
         },
         
         switchTab(tabName) {
-            console.log('Switching to tab:', tabName);
-            
-            document.querySelectorAll('.tab').forEach(tab => {
-                tab.classList.remove('active');
-            });
-            if (event && event.target) {
-                event.target.classList.add('active');
+            // The shell owns tab state: it drives the rail's active marker and
+            // emits `tab:show`, which is what the data tabs load on. Falls back
+            // to the old direct DOM swap if the shell has not booted yet.
+            if (window.Shell && window.Shell.showTab) {
+                window.Shell.showTab(tabName);
+                return;
             }
-            
+
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.toggle('active', tab.dataset.tab === tabName);
+            });
             document.querySelectorAll('.tab-content').forEach(content => {
                 content.classList.remove('active');
             });
@@ -490,6 +492,10 @@ function initApp() {
             
             const pathInput = document.getElementById('currentPath');
             if (pathInput) pathInput.value = path;
+
+            // The visible path is the breadcrumb bar in the shell; the input
+            // above is kept as the value other code still reads.
+            document.dispatchEvent(new CustomEvent('path:changed', { detail: path }));
             
             const tree = document.getElementById('fileTree');
             if (!tree) return;
@@ -544,8 +550,9 @@ function initApp() {
             div.className = 'file-item';
             
             const icon = document.createElement('span');
-            icon.className = 'file-icon';
-            icon.textContent = file.isDir ? '📁' : this.getFileIcon(file.name);
+            const kind = window.Icons ? window.Icons.kindFor(file.name, file.isDir) : 'file';
+            icon.className = 'file-icon kind-' + kind;
+            icon.innerHTML = this.getFileIcon(file.name, file.isDir);
             
             const name = document.createElement('span');
             name.className = 'file-name';
@@ -591,15 +598,12 @@ function initApp() {
             return div;
         },
         
-        getFileIcon(filename) {
-            const ext = filename.split('.').pop().toLowerCase();
-            const icons = {
-                js: '📜', py: '🐍', php: '🐘', html: '🌐', css: '🎨',
-                json: '📋', xml: '📄', md: '📝', txt: '📄', log: '📊',
-                jpg: '🖼️', png: '🖼️', gif: '🖼️', svg: '🖼️',
-                zip: '📦', tar: '📦', gz: '📦',
-            };
-            return icons[ext] || '📄';
+        // Returns SVG markup from the shared sprite (see icons.js). Kept as
+        // getFileIcon so existing callers do not change; the emoji map it
+        // replaced could not be recoloured or sized.
+        getFileIcon(filename, isDir = false) {
+            if (window.Icons) return window.Icons.forFile(filename, isDir);
+            return '';
         },
         
         // Editor functions
@@ -617,33 +621,10 @@ function initApp() {
                 ? '/' + file.name 
                 : safePath + '/' + file.name;
             
-            // Check if split view is active
-            if (window.splitView && window.splitView.isActive) {
-                // If file is already open in main tabs, use that content
-                let content;
-                if (this.openFiles.has(filePath)) {
-                    content = this.openFiles.get(filePath).content;
-                } else {
-                    try {
-                        content = await window.go.main.App.GetFileContent(filePath);
-                        // Also add to main open files
-                        this.openFiles.set(filePath, {
-                            name: file.name,
-                            content: content,
-                            originalContent: content,
-                            modified: false
-                        });
-                    } catch (err) {
-                        alert('Failed to open file: ' + err);
-                        return;
-                    }
-                }
-                
-                // Open in the active split pane
-                window.splitView.openFileInPane(filePath, content);
-                return;
-            }
-            
+            // The split editor browses and loads its own files on each side
+            // (see split-view.js), so opening from this tree always targets
+            // the main editor.
+
             // Check if already open
             if (this.openFiles.has(filePath)) {
                 this.switchToFile(filePath);
@@ -1367,11 +1348,17 @@ function initApp() {
                 dropdown.innerHTML = '<option value="" disabled>Select Panel</option>';
                 
                 // Add panel options
+                const panelDetails = await window.go.main.App.GetPanels().catch(() => []);
+                const urlFor = {};
+                (panelDetails || []).forEach(p => { urlFor[p.name] = p.url || p.panelURL || ''; });
+
                 panels.forEach(panel => {
                     const option = document.createElement('option');
                     option.value = panel;
                     option.textContent = panel;
                     option.selected = panel === activePanel;
+                    // Read by the chip menu in ui-shell.js for the sub-label.
+                    if (urlFor[panel]) option.dataset.sub = String(urlFor[panel]).replace(/^https?:\/\//, '');
                     dropdown.appendChild(option);
                 });
                 
