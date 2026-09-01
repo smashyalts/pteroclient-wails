@@ -88,12 +88,12 @@
         <button class="tab" data-tab="files" data-icon="folder" type="button">Files</button>
         <div class="rail-sep"></div>
         <button class="tab" data-tab="databases" data-icon="database" type="button">Data</button>
-        <button class="tab" data-tab="backups" data-icon="backup" type="button">Backups</button>
         <button class="tab" data-tab="schedules" data-icon="clock" type="button">Sched</button>
         <button class="tab" data-tab="users" data-icon="users" type="button">Users</button>
         <button class="tab" data-tab="network" data-icon="network" type="button">Network</button>
         <button class="tab" data-tab="startup" data-icon="sliders" type="button">Startup</button>
         <div class="rail-sep"></div>
+        <button class="tab" data-tab="vault" data-icon="shield" type="button">Vault</button>
         <button class="tab" data-tab="activity" data-icon="activity" type="button">Activity</button>
         <button class="tab" data-tab="settings" data-icon="cog" type="button">Settings</button>
     </nav>
@@ -153,6 +153,7 @@
                             <button onclick="window.app.saveFile()" id="saveBtn" class="primary" style="display:none;" type="button">Save</button>
                             <button onclick="window.app.saveAllFiles()" id="saveAllBtn" style="display:none;" type="button">Save all</button>
                             <button onclick="window.app.formatDocument && window.app.formatDocument()" id="formatBtn" style="display:none;" type="button">Format</button>
+                            <button onclick="window.Vault && window.Vault.showHistoryFor(window.app.activeFile)" id="historyBtn" style="display:none;" type="button">History</button>
                             <button onclick="window.app.closeFile()" id="closeBtn" style="display:none;" type="button">Close</button>
                         </div>
                     </div>
@@ -185,18 +186,7 @@
             <div class="pane" id="databasesBody"></div>
         </div>
 
-        <!-- Backups ------------------------------------------------------ -->
-        <div id="backupsTab" class="tab-content">
-            <div class="toolbar">
-                <span class="toolbar-title">Backups</span>
-                <div class="spacer"></div>
-                <button data-reload="backups" type="button">Refresh</button>
-                <button class="primary" id="newBackupBtn" type="button">Create backup</button>
-            </div>
-            <div class="pane" id="backupsBody"></div>
-        </div>
-
-        <!-- Schedules ---------------------------------------------------- -->
+        <!-- Schedules---------------------------------------------------- -->
         <div id="schedulesTab" class="tab-content">
             <div class="toolbar">
                 <span class="toolbar-title">Schedules</span>
@@ -234,6 +224,20 @@
                 <button data-reload="startup" type="button">Refresh</button>
             </div>
             <div class="pane" id="startupBody"></div>
+        </div>
+
+        <!-- Vault -------------------------------------------------------- -->
+        <!-- Local file history and recycle bin. Everything here lives on this
+             machine under ~/.pteroclient; nothing in this tab touches the
+             panel until you press Restore. -->
+        <div id="vaultTab" class="tab-content">
+            <div class="toolbar">
+                <span class="toolbar-title">Vault</span>
+                <div class="spacer"></div>
+                <button data-reload="vault" type="button">Refresh</button>
+                <button class="danger" id="vaultEmptyBinBtn" type="button">Empty recycle bin</button>
+            </div>
+            <div class="pane" id="vaultBody"></div>
         </div>
 
         <!-- Activity ----------------------------------------------------- -->
@@ -326,5 +330,6 @@
 <script src="./ui-shell.js"></script>
 <script src="./panel-tabs.js"></script>
 <script src="./split-view.js"></script>
+<script src="./vault.js"></script>
 </body>
 </html>

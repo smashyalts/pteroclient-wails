@@ -50,6 +50,18 @@
 
         open(opts) {
             const modal = $('appDialog');
+
+            // Only one dialog can be on screen, and only one _resolve can be
+            // held. A second open() used to overwrite the first's resolve, so
+            // whatever was awaiting it never settled again — and an awaited
+            // confirm that never settles is an action that silently stalls
+            // half-done. Settle the outgoing one as a cancel first.
+            if (Dialog._resolve) {
+                const stale = Dialog._resolve;
+                Dialog._resolve = null;
+                stale(null);
+            }
+
             $('appDialogTitle').textContent = opts.title || 'Confirm';
             $('appDialogBody').innerHTML = opts.body || '';
             const confirmBtn = modal.querySelector('[data-dialog-confirm]');
@@ -84,10 +96,12 @@
         },
 
         /** Form dialog. `fields` is [{name,label,placeholder,type,value}].
+         *  `opts.intro` is HTML placed above the fields — used by the delete
+         *  confirmation to show what is about to go before asking to type it.
          *  Resolves an object of values, or null when cancelled. */
         form(title, fields, opts) {
             const o = opts || {};
-            const body = fields.map((f) => (
+            const body = (o.intro || '') + fields.map((f) => (
                 '<div class="form-group">' +
                 '<label>' + escapeHtml(f.label) + '</label>' +
                 '<input type="' + (f.type || 'text') + '" ' +
@@ -127,6 +141,11 @@
         });
         modal.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' && e.target.tagName === 'INPUT') Dialog.close(true);
+        });
+        // Escape cancels. Without this a dialog opened over a destructive
+        // action has only one obvious way out, which is the confirm button.
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && modal.classList.contains('show')) Dialog.close(null);
         });
     }
 

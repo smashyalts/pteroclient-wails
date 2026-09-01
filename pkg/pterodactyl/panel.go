@@ -8,9 +8,16 @@ import (
 )
 
 // This file covers the parts of the Pterodactyl client API that the file
-// manager and console do not touch: databases, backups, schedules, subusers,
-// network allocations, startup variables, server settings and the activity
-// log. Routes follow panel/routes/api-client.php.
+// manager and console do not touch: databases, schedules, subusers, network
+// allocations, startup variables, server settings and the activity log. Routes
+// follow panel/routes/api-client.php.
+//
+// Two route groups are deliberately absent. The backup routes are not
+// implemented, so nothing here — however buggy — can restore a backup over the
+// server's files or destroy one. Neither is the reinstall route, which re-runs
+// the egg's install script and wipes the files on some eggs. Both are one
+// mis-fired request away from losing a server, and both are still available in
+// the panel's own UI for the rare times they are wanted.
 //
 // Listing endpoints are returned as decoded attribute maps rather than typed
 // structs: the panel adds fields between releases, and the frontend renders
@@ -182,54 +189,6 @@ func (c *Client) DeleteDatabase(databaseID string) error {
 	return err
 }
 
-// ------------------------------------------------------------------ backups
-
-// ListBackups returns the server's backups, newest first as the panel orders them.
-func (c *Client) ListBackups() ([]Attributes, error) {
-	return c.getList(c.serverPath("/backups"))
-}
-
-// CreateBackup starts a new backup. ignored is a newline-separated list of
-// glob patterns to exclude; both arguments may be empty.
-func (c *Client) CreateBackup(name, ignored string) (Attributes, error) {
-	return c.mutate(http.MethodPost, c.serverPath("/backups"), map[string]interface{}{
-		"name":    name,
-		"ignored": ignored,
-	})
-}
-
-// GetBackupDownloadURL returns a signed, short-lived download URL.
-func (c *Client) GetBackupDownloadURL(backupUUID string) (string, error) {
-	attrs, err := c.getObject(c.serverPath("/backups/%s/download", backupUUID))
-	if err != nil {
-		return "", err
-	}
-	if raw, ok := attrs["url"].(string); ok {
-		return raw, nil
-	}
-	return "", fmt.Errorf("no download URL in response")
-}
-
-// ToggleBackupLock locks or unlocks a backup against deletion.
-func (c *Client) ToggleBackupLock(backupUUID string) (Attributes, error) {
-	return c.mutate(http.MethodPost, c.serverPath("/backups/%s/lock", backupUUID), nil)
-}
-
-// RestoreBackup restores a backup over the server's files. When truncate is
-// true the existing files are removed first.
-func (c *Client) RestoreBackup(backupUUID string, truncate bool) error {
-	_, err := c.mutate(http.MethodPost, c.serverPath("/backups/%s/restore", backupUUID), map[string]bool{
-		"truncate": truncate,
-	})
-	return err
-}
-
-// DeleteBackup removes a backup. Locked backups are refused by the panel.
-func (c *Client) DeleteBackup(backupUUID string) error {
-	_, err := c.mutate(http.MethodDelete, c.serverPath("/backups/%s", backupUUID), nil)
-	return err
-}
-
 // ---------------------------------------------------------------- schedules
 
 // ListSchedules returns the server's schedules with their tasks included.
@@ -383,13 +342,6 @@ func (c *Client) RenameServer(name, description string) error {
 		"name":        name,
 		"description": description,
 	})
-	return err
-}
-
-// ReinstallServer re-runs the egg's install script. Destructive: the panel
-// warns that some eggs wipe the server's files.
-func (c *Client) ReinstallServer() error {
-	_, err := c.mutate(http.MethodPost, c.serverPath("/settings/reinstall"), nil)
 	return err
 }
 

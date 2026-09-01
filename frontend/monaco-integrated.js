@@ -274,6 +274,7 @@ function replaceEditor() {
     // Create Monaco editor instance
     let monacoEditor = null;
     let monacoModels = new Map();
+    let welcomeModel = null;
     
     // Replace the editor with Monaco
     app.editor = {
@@ -378,35 +379,39 @@ function replaceEditor() {
         app.editor.onChange = oldEditor.onChange;
     }
     
-    // Override openFile to detect language
+    // Override openFile to detect language.
+    //
+    // The path comes from the entry the file tree rendered, not from
+    // currentPath: by the time a tab is reopened the tree may be showing a
+    // different directory, and recomputing here pointed the model at a file
+    // with the same name somewhere else.
     const originalOpenFile = app.openFile;
     app.openFile = async function(file) {
         const result = await originalOpenFile.call(this, file);
-        
+
         if (monacoEditor && file && !file.isDir) {
-            // Detect language from file extension
+            const filePath = this.resolvePath(file);
+            // originalOpenFile bails out for binary and oversized files, so
+            // there is nothing open to point a model at.
+            if (!filePath || !this.openFiles.has(filePath)) return result;
+
             const ext = file.name.split('.').pop().toLowerCase();
             const language = LANGUAGE_MAP[ext] || 'plaintext';
-            
-            // Get or create model for this file
-            const filePath = this.currentPath === '/' 
-                ? '/' + file.name 
-                : this.currentPath + '/' + file.name;
-            
+
             let model = monacoModels.get(filePath);
             if (!model) {
-                const content = this.openFiles.get(filePath)?.content || '';
+                const content = this.openFiles.get(filePath).content || '';
                 model = monaco.editor.createModel(content, language);
                 monacoModels.set(filePath, model);
             }
-            
-            monacoEditor.setModel(model);
-            
+
+            if (monacoEditor.getModel() !== model) monacoEditor.setModel(model);
+
             // Update file type display
             const typeEl = document.getElementById('fileType');
             if (typeEl) {
                 const types = {
-                    javascript: 'JavaScript', python: 'Python', 
+                    javascript: 'JavaScript', python: 'Python',
                     yaml: 'YAML', json: 'JSON', html: 'HTML',
                     css: 'CSS', markdown: 'Markdown',
                     plaintext: 'Plain Text'
@@ -414,19 +419,22 @@ function replaceEditor() {
                 typeEl.textContent = types[language] || language;
             }
         }
-        
+
         return result;
     };
     
-    // Override switchToFile to use models
+    // Override switchToFile to use models.
+    //
+    // The model is attached BEFORE the base implementation runs. The base ends
+    // with editor.setValue(file.content), and setValue writes into whichever
+    // model is currently attached — doing it the other way round wrote the
+    // incoming file's text into the outgoing file's model.
     const originalSwitchToFile = app.switchToFile;
     app.switchToFile = function(path) {
-        originalSwitchToFile.call(this, path);
-        
         if (monacoEditor) {
             let model = monacoModels.get(path);
             const file = this.openFiles.get(path);
-            
+
             if (file && !model) {
                 // Detect language
                 const ext = file.name.split('.').pop().toLowerCase();
@@ -434,11 +442,13 @@ function replaceEditor() {
                 model = monaco.editor.createModel(file.content, language);
                 monacoModels.set(path, model);
             }
-            
+
             if (model) {
                 monacoEditor.setModel(model);
             }
         }
+
+        originalSwitchToFile.call(this, path);
     };
     
     // Override closeFileTab to dispose models
@@ -452,13 +462,16 @@ function replaceEditor() {
         }
         
         originalCloseFileTab.call(this, path);
-        
-        // If no files are open, show welcome message
+
+        // If no files are open, show welcome message. The placeholder model is
+        // reused rather than recreated; the old code leaked one per close.
         if (this.openFiles.size === 0 && monacoEditor) {
-            const welcomeModel = monaco.editor.createModel(
-                '// Welcome to Pterodactyl Manager\n// Select a file from the file tree to edit\n',
-                'javascript'
-            );
+            if (!welcomeModel) {
+                welcomeModel = monaco.editor.createModel(
+                    '// Welcome to Pterodactyl Manager\n// Select a file from the file tree to edit\n',
+                    'javascript'
+                );
+            }
             monacoEditor.setModel(welcomeModel);
         }
     };

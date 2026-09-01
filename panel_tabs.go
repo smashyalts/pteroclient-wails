@@ -9,9 +9,15 @@ import (
 )
 
 // Bindings for the panel tabs that sit alongside Files and Console:
-// Databases, Backups, Schedules, Users, Network, Startup, Settings and
-// Activity. They all act on the active server, the same way the console and
-// power controls do — switching servers goes through SwitchServer first.
+// Databases, Schedules, Users, Network, Startup, Settings and Activity. They
+// all act on the active server, the same way the console and power controls
+// do — switching servers goes through SwitchServer first.
+//
+// There is no Backups binding and no ReinstallServer binding. A restore
+// overwrites every file on the server and a reinstall wipes them on some eggs;
+// neither is recoverable from anything this app keeps locally, so they are left
+// out of the app rather than guarded by a dialog. The panel's own UI still has
+// them.
 
 func (a *App) requireClient() error {
 	if a.client == nil {
@@ -108,66 +114,6 @@ func (a *App) DeleteDatabase(databaseID string) error {
 		return err
 	}
 	return a.client.DeleteDatabase(databaseID)
-}
-
-// ------------------------------------------------------------------ backups
-
-func (a *App) ListBackups() ([]map[string]interface{}, error) {
-	if err := a.requireClient(); err != nil {
-		return nil, err
-	}
-	items, err := a.client.ListBackups()
-	if err != nil {
-		return nil, err
-	}
-	return toMaps(items), nil
-}
-
-func (a *App) CreateBackup(name, ignored string) (map[string]interface{}, error) {
-	if err := a.requireClient(); err != nil {
-		return nil, err
-	}
-	attrs, err := a.client.CreateBackup(name, ignored)
-	if err != nil {
-		return nil, err
-	}
-	runtime.EventsEmit(a.ctx, "backup-started", name)
-	return map[string]interface{}(attrs), nil
-}
-
-// GetBackupDownloadURL returns a signed URL the frontend opens in a browser.
-func (a *App) GetBackupDownloadURL(backupUUID string) (string, error) {
-	if err := a.requireClient(); err != nil {
-		return "", err
-	}
-	return a.client.GetBackupDownloadURL(backupUUID)
-}
-
-func (a *App) ToggleBackupLock(backupUUID string) (map[string]interface{}, error) {
-	if err := a.requireClient(); err != nil {
-		return nil, err
-	}
-	attrs, err := a.client.ToggleBackupLock(backupUUID)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]interface{}(attrs), nil
-}
-
-// RestoreBackup overwrites the server's files with a backup. truncate removes
-// the existing files first.
-func (a *App) RestoreBackup(backupUUID string, truncate bool) error {
-	if err := a.requireClient(); err != nil {
-		return err
-	}
-	return a.client.RestoreBackup(backupUUID, truncate)
-}
-
-func (a *App) DeleteBackup(backupUUID string) error {
-	if err := a.requireClient(); err != nil {
-		return err
-	}
-	return a.client.DeleteBackup(backupUUID)
 }
 
 // ---------------------------------------------------------------- schedules
@@ -341,15 +287,6 @@ func (a *App) RenameServer(name, description string) error {
 	}
 	runtime.EventsEmit(a.ctx, "server-renamed", name)
 	return nil
-}
-
-// ReinstallServer re-runs the egg install script. Destructive on some eggs —
-// the frontend confirms before calling this.
-func (a *App) ReinstallServer() error {
-	if err := a.requireClient(); err != nil {
-		return err
-	}
-	return a.client.ReinstallServer()
 }
 
 // ----------------------------------------------------------------- activity

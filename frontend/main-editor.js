@@ -131,6 +131,10 @@ function initApp() {
     // Main app object
     const app = {
         currentPath: '/',
+        // selectedFile carries the full remote path it was rendered with, so a
+        // later navigation cannot repoint a stale selection at a same-named
+        // file in another directory. Deleting used to rebuild the path from
+        // currentPath at click time, which did exactly that.
         selectedFile: null,
         contextFile: null,
         isConnected: false,
@@ -486,7 +490,11 @@ function initApp() {
                 path = '/';
             }
             this.currentPath = path;
-            
+
+            // Leaving a directory drops the selection with it. Keeping it is
+            // how a delete aimed at /a/config.yml lands on /b/config.yml.
+            this.clearSelection();
+
             // Add to navigation history
             this.addToHistory(path);
             
@@ -548,6 +556,15 @@ function initApp() {
         createFileItem(file, isParent = false) {
             const div = document.createElement('div');
             div.className = 'file-item';
+
+            // Resolved once, at render time, and carried on the row. Every
+            // action on this row uses it instead of recomputing from
+            // currentPath, which may have moved on by then.
+            const fullPath = isParent
+                ? null
+                : (this.currentPath === '/' ? '/' + file.name : this.currentPath + '/' + file.name);
+            const entry = isParent ? null : Object.assign({}, file, { path: fullPath });
+            div.dataset.path = fullPath || '';
             
             const icon = document.createElement('span');
             const kind = window.Icons ? window.Icons.kindFor(file.name, file.isDir) : 'file';
@@ -573,31 +590,66 @@ function initApp() {
                     const parentPath = '/' + parts.join('/');
                     this.loadFiles(parentPath || '/');
                 } else if (file.isDir) {
-                    const newPath = this.currentPath === '/' 
-                        ? '/' + file.name 
-                        : this.currentPath + '/' + file.name;
-                    this.loadFiles(newPath);
+                    this.loadFiles(fullPath);
                 } else {
-                    document.querySelectorAll('.file-item').forEach(item => {
-                        item.classList.remove('selected');
-                    });
-                    div.classList.add('selected');
-                    this.selectedFile = file;
-                    this.openFile(file);
+                    this.markSelected(div, entry);
+                    this.openFile(entry);
                 }
             });
             
             div.addEventListener('contextmenu', (e) => {
                 e.preventDefault();
                 if (!isParent) {
-                    this.selectedFile = file;
-                    this.showContextMenu(e, file);
+                    this.markSelected(div, entry);
+                    this.showContextMenu(e, entry);
                 }
             });
             
             return div;
         },
         
+        markSelected(row, entry) {
+            document.querySelectorAll('.file-item').forEach(item => {
+                item.classList.remove('selected');
+            });
+            if (row) row.classList.add('selected');
+            this.selectedFile = entry;
+            this.contextFile = entry;
+        },
+
+        clearSelection() {
+            this.selectedFile = null;
+            this.contextFile = null;
+            document.querySelectorAll('.file-item.selected').forEach(item => {
+                item.classList.remove('selected');
+            });
+        },
+
+        // Every path the UI hands to the backend goes through here first. The
+        // backend re-validates, but a bad path caught in the editor produces a
+        // better message than a rejected API call.
+        resolvePath(entry) {
+            if (!entry) return null;
+            if (entry.path) return entry.path;
+            if (!entry.name) return null;
+            return this.currentPath === '/' ? '/' + entry.name : this.currentPath + '/' + entry.name;
+        },
+
+        say(title, message) {
+            if (window.Shell && window.Shell.dialog) {
+                return window.Shell.dialog.confirm(title, this.escapeHtml(message), { confirmLabel: 'OK' });
+            }
+            alert(title + '\n\n' + message);
+            return Promise.resolve(true);
+        },
+
+        ask(title, message, opts) {
+            if (window.Shell && window.Shell.dialog) {
+                return window.Shell.dialog.confirm(title, message, opts);
+            }
+            return Promise.resolve(confirm(title));
+        },
+
         // Returns SVG markup from the shared sprite (see icons.js). Kept as
         // getFileIcon so existing callers do not change; the emoji map it
         // replaced could not be recoloured or sized.
@@ -609,18 +661,15 @@ function initApp() {
         // Editor functions
         async openFile(file) {
             if (!file || file.isDir) return;
-            
+
             // Auto-save current file if enabled
             if (this.autoSave && this.activeFile && this.isFileModified(this.activeFile)) {
                 await this.saveFile();
             }
-            
-            // Ensure currentPath is valid
-            const safePath = this.currentPath || '/';
-            const filePath = safePath === '/' 
-                ? '/' + file.name 
-                : safePath + '/' + file.name;
-            
+
+            const filePath = this.resolvePath(file);
+            if (!filePath) return;
+
             // The split editor browses and loads its own files on each side
             // (see split-view.js), so opening from this tree always targets
             // the main editor.
@@ -630,29 +679,48 @@ function initApp() {
                 this.switchToFile(filePath);
                 return;
             }
-            
+
             try {
-                const content = await window.go.main.App.GetFileContent(filePath);
-                
+                // ReadFileForEdit refuses the two cases where a later save
+                // would corrupt the file: content that is not valid UTF-8, and
+                // a file too big to hold in the editor intact. Opening either
+                // and saving it back writes a mangled copy over the real one.
+                const read = await window.go.main.App.ReadFileForEdit('', filePath);
+
+                if (read.too_big) {
+                    await this.say('Too large to edit',
+                        file.name + ' is ' + this.formatSize(read.size) +
+                        '. The editor caps files at 8 MB so a save cannot truncate one. ' +
+                        'Use the panel or SFTP for this file.');
+                    return;
+                }
+                if (read.binary) {
+                    await this.say('Not a text file',
+                        file.name + ' is not valid UTF-8, so it is a binary file. ' +
+                        'Editing it here would corrupt it on save.');
+                    return;
+                }
+
                 // Add to open files
                 this.openFiles.set(filePath, {
                     name: file.name,
-                    content: content,
-                    originalContent: content,
+                    path: filePath,
+                    content: read.content,
+                    originalContent: read.content,
                     modified: false
                 });
-                
+
                 // Add tab
                 this.addEditorTab(filePath, file.name);
-                
+
                 // Switch to file
                 this.switchToFile(filePath);
-                
+
                 // Update file type
                 this.updateFileType(file.name);
-                
+
             } catch (err) {
-                alert('Failed to open file: ' + err);
+                await this.say('Failed to open file', String(err));
             }
         },
         
@@ -709,6 +777,7 @@ function initApp() {
             document.getElementById('saveBtn').style.display = '';
             document.getElementById('saveAllBtn').style.display = '';
             document.getElementById('closeBtn').style.display = '';
+            document.getElementById('historyBtn').style.display = '';
             
             // Focus editor
             this.editor.focus();
@@ -743,35 +812,65 @@ function initApp() {
         
         async saveFile() {
             if (!this.activeFile) return;
-            
+
             const file = this.openFiles.get(this.activeFile);
             if (!file || !file.modified) return;
-            
+
+            return this.writeFile(this.activeFile, file, false);
+        },
+
+        /**
+         * The single write path for the main editor.
+         *
+         * The backend copies the remote bytes locally before replacing them,
+         * and refuses the write outright when the panel's copy no longer
+         * matches what this editor loaded - someone editing the same file in
+         * the panel, or a plugin rewriting its own config, would otherwise be
+         * silently overwritten. `force` answers that prompt; the local copy is
+         * still taken, so even a forced overwrite is recoverable from Vault.
+         */
+        async writeFile(path, file, force) {
             try {
-                await window.go.main.App.SaveFileContent(this.activeFile, file.content);
+                const res = await window.go.main.App.SafeSaveFileContent(
+                    path, file.content, file.originalContent, !!force);
+
+                if (res && res.conflict) {
+                    // Show the change rather than describing it: deciding
+                    // whether to overwrite needs to know what would be lost.
+                    let diff = '';
+                    if (res.remote_content && window.Vault && window.Vault.diffHtml) {
+                        diff = '<div style="margin-top:12px">' +
+                            window.Vault.diffHtml(res.remote_content, file.content) + '</div>';
+                    }
+
+                    const ok = await this.ask('The panel copy changed',
+                        '<b>' + this.escapeHtml(path) + '</b> ' + this.escapeHtml(res.reason) + '.' +
+                        '<br><br>Saving now replaces what is on the panel with what is in this editor. ' +
+                        'The panel copy is filed in the local history first, so it can be restored from Vault.' +
+                        diff,
+                        { danger: true, confirmLabel: 'Overwrite anyway' });
+                    if (!ok) return false;
+                    return this.writeFile(path, file, true);
+                }
+
                 file.originalContent = file.content;
                 file.modified = false;
-                this.updateTabModified(this.activeFile, false);
-                console.log('File saved:', this.activeFile);
+                this.updateTabModified(path, false);
+                console.log('File saved:', path, res && res.version_id ? '(version ' + res.version_id + ')' : '');
+                return true;
             } catch (err) {
-                alert('Failed to save file: ' + err);
+                await this.say('Failed to save file', String(err));
+                return false;
             }
         },
-        
+
         async saveAllFiles() {
             for (const [path, file] of this.openFiles) {
                 if (file.modified) {
-                    try {
-                        await window.go.main.App.SaveFileContent(path, file.content);
-                        file.originalContent = file.content;
-                        file.modified = false;
-                        this.updateTabModified(path, false);
-                    } catch (err) {
-                        console.error('Failed to save file:', path, err);
-                    }
+                    await this.writeFile(path, file, false);
                 }
             }
-            console.log('All files saved');
+            console.log('Save all finished');
         },
         
         async closeFile() {
@@ -779,11 +878,17 @@ function initApp() {
             
             const file = this.openFiles.get(this.activeFile);
             if (file && file.modified) {
-                if (confirm('Save changes to ' + file.name + '?')) {
-                    await this.saveFile();
+                const save = await this.ask('Unsaved changes',
+                    'Save changes to <b>' + this.escapeHtml(file.name) + '</b> before closing?',
+                    { confirmLabel: 'Save and close' });
+                if (save) {
+                    const written = await this.saveFile();
+                    // A refused or failed save must not close the tab; that
+                    // would drop the edits with no way back.
+                    if (written === false) return;
                 }
             }
-            
+
             this.closeFileTab(this.activeFile);
         },
         
@@ -829,7 +934,8 @@ function initApp() {
                     document.getElementById('saveBtn').style.display = 'none';
                     document.getElementById('saveAllBtn').style.display = 'none';
                     document.getElementById('closeBtn').style.display = 'none';
-                    
+                    document.getElementById('historyBtn').style.display = 'none';
+
                     // Update file type to show no file
                     const typeEl = document.getElementById('fileType');
                     if (typeEl) {
@@ -840,19 +946,25 @@ function initApp() {
         },
         
         async newFile() {
-            const name = prompt('File name:');
-            if (!name) return;
-            
+            const v = await window.Shell.dialog.form('New file', [
+                { name: 'name', label: 'File name', placeholder: 'config.yml', mono: true }
+            ], { confirmLabel: 'Create' });
+            if (!v || !v.name || !v.name.trim()) return;
+
+            const name = v.name.trim();
             const path = this.currentPath === '/' ? '/' + name : this.currentPath + '/' + name;
-            
+
             try {
-                await window.go.main.App.SaveFileContent(path, '');
+                // CreateFileStrict refuses a name that is already taken. The
+                // old path wrote an empty string to it, which truncated any
+                // existing file of that name to nothing.
+                await window.go.main.App.CreateFileStrict(path);
                 await this.refreshFiles();
-                
+
                 // Open the new file
-                this.openFile({ name: name, isDir: false, size: 0 });
+                await this.openFile({ name: name, isDir: false, size: 0, path: path });
             } catch (err) {
-                alert('Failed to create file: ' + err);
+                await this.say('Could not create the file', String(err));
             }
         },
         
@@ -913,86 +1025,279 @@ function initApp() {
         
         async handleFileUpload(files) {
             for (const file of files) {
+                const path = this.currentPath === '/'
+                    ? '/' + file.name
+                    : this.currentPath + '/' + file.name;
+
+                let bytes;
                 try {
-                    const buffer = await file.arrayBuffer();
-                    const path = this.currentPath === '/' 
-                        ? '/' + file.name 
-                        : this.currentPath + '/' + file.name;
-                    
-                    await window.go.main.App.UploadFile(path, Array.from(new Uint8Array(buffer)));
+                    bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+                } catch (err) {
+                    await this.say('Could not read ' + file.name, String(err));
+                    continue;
+                }
+
+                try {
+                    // overwrite is false, so an upload that would land on an
+                    // existing name is refused rather than performed.
+                    await window.go.main.App.UploadFileSafe(path, bytes, false);
                     console.log('Uploaded:', file.name);
                 } catch (err) {
-                    alert('Failed to upload ' + file.name + ': ' + err);
+                    const message = String(err);
+                    if (message.indexOf('already exists') === -1) {
+                        await this.say('Failed to upload ' + file.name, message);
+                        continue;
+                    }
+                    const ok = await this.ask('Replace ' + this.escapeHtml(file.name) + '?',
+                        'A file with that name is already in <span class="mono">' + this.escapeHtml(this.currentPath) + '</span>. ' +
+                        'Replacing it puts the current file in the local recycle bin first.',
+                        { danger: true, confirmLabel: 'Replace' });
+                    if (!ok) continue;
+                    try {
+                        await window.go.main.App.UploadFileSafe(path, bytes, true);
+                    } catch (err2) {
+                        await this.say('Failed to upload ' + file.name, String(err2));
+                    }
                 }
             }
             await this.refreshFiles();
         },
         
         async newFolder() {
-            const name = prompt('Folder name:');
-            if (!name) return;
-            
+            const v = await window.Shell.dialog.form('New folder', [
+                { name: 'name', label: 'Folder name', placeholder: 'plugins', mono: true }
+            ], { confirmLabel: 'Create' });
+            if (!v || !v.name || !v.name.trim()) return;
+
+            const name = v.name.trim();
             try {
-                const path = this.currentPath === '/' 
-                    ? '/' + name 
+                const path = this.currentPath === '/'
+                    ? '/' + name
                     : this.currentPath + '/' + name;
                 await window.go.main.App.CreateFolder(path);
                 await this.refreshFiles();
             } catch (err) {
-                alert('Failed to create folder: ' + err);
+                await this.say('Could not create the folder', String(err));
             }
         },
         
         async deleteSelected() {
-            if (!this.selectedFile) {
-                alert('No file selected');
+            const path = this.resolvePath(this.selectedFile);
+            if (!path) {
+                await this.say('Nothing selected', 'Pick a file or folder in the tree first.');
                 return;
             }
-            
-            if (!confirm('Delete ' + this.selectedFile.name + '?')) return;
-            
-            try {
-                const path = this.currentPath === '/' 
-                    ? '/' + this.selectedFile.name 
-                    : this.currentPath + '/' + this.selectedFile.name;
-                await window.go.main.App.DeleteFiles([path]);
-                await this.refreshFiles();
-            } catch (err) {
-                alert('Failed to delete: ' + err);
-            }
+            await this.deletePaths([path]);
         },
-        
+
         async deleteFile() {
             await this.deleteSelected();
         },
-        
-        renameFile() {
-            if (!this.selectedFile) return;
-            
-            const newName = prompt('New name:', this.selectedFile.name);
-            if (!newName || newName === this.selectedFile.name) return;
-            
-            // TODO: Implement rename
-            alert('Rename not implemented yet');
+
+        /**
+         * Deleting is a handshake, not a click.
+         *
+         * PlanDelete walks the selection on the panel and returns exactly what
+         * would go, plus a token bound to that path set. Nothing is removed
+         * until SafeDeleteFiles is called with that token, so a stale
+         * selection, a double click or a re-render cannot delete anything the
+         * dialog did not list. Everything the plan captures lands in the local
+         * recycle bin first.
+         */
+        async deletePaths(paths) {
+            if (!paths || !paths.length) return;
+
+            let plan;
+            try {
+                plan = await window.go.main.App.PlanDelete('', paths);
+            } catch (err) {
+                await this.say('Cannot delete', String(err));
+                return;
+            }
+
+            const intro = this.renderDeletePlan(plan);
+            // Anything recursive, anything the backend flagged as critical, and
+            // anything that will not fit in the recycle bin has to be typed out.
+            const strict = (plan.critical && plan.critical.length > 0) ||
+                !plan.recoverable || plan.dir_count > 0;
+
+            if (strict) {
+                const v = await window.Shell.dialog.form('Delete ' + plan.roots.length + ' item(s)', [
+                    { name: 'confirm', label: 'Type DELETE to confirm', placeholder: 'DELETE', mono: true }
+                ], { confirmLabel: 'Delete', danger: true, intro: intro });
+                if (!v) return;
+                if (String(v.confirm || '').trim().toUpperCase() !== 'DELETE') {
+                    await this.say('Nothing deleted', 'The confirmation did not match, so nothing was removed.');
+                    return;
+                }
+            } else {
+                const ok = await window.Shell.dialog.open({
+                    title: 'Delete ' + plan.roots.length + ' item(s)',
+                    body: intro,
+                    confirmLabel: 'Delete',
+                    danger: true
+                });
+                if (!ok) return;
+            }
+
+            try {
+                const outcome = await window.go.main.App.SafeDeleteFiles(plan.token);
+                this.forgetOpenFilesUnder(plan.roots);
+                await this.refreshFiles();
+
+                if (outcome.skipped && outcome.skipped.length) {
+                    await this.say('Deleted, with gaps',
+                        outcome.captured + ' file(s) went to the recycle bin. ' +
+                        outcome.skipped.length + ' could not be copied first and are gone for good:\n' +
+                        outcome.skipped.join('\n'));
+                } else if (outcome.captured > 0) {
+                    // Undo offered where the mistake is noticed: right after it.
+                    const undo = await this.ask('Deleted',
+                        outcome.captured + ' file(s) went to the recycle bin.',
+                        { confirmLabel: 'Undo' });
+                    if (undo && outcome.batch) {
+                        try {
+                            const back = await window.go.main.App.RestoreBinBatch(outcome.batch, false);
+                            await this.refreshFiles();
+                            await this.say('Undone', (back.restored || []).length + ' file(s) put back.');
+                        } catch (err) {
+                            await this.say('Could not undo', String(err));
+                        }
+                    }
+                }
+            } catch (err) {
+                await this.say('Delete failed', String(err));
+            }
         },
-        
-        duplicateFile() {
-            alert('Duplicate not implemented yet');
+
+        renderDeletePlan(plan) {
+            const esc = (v) => this.escapeHtml(v);
+            const size = (v) => window.Shell.fmt.bytes(v);
+
+            let html = '<div style="font-size:12.5px;line-height:1.6;color:var(--text-secondary)">';
+
+            html += '<p><b>' + plan.file_count + '</b> file' + (plan.file_count === 1 ? '' : 's');
+            if (plan.dir_count) html += ' and <b>' + plan.dir_count + '</b> folder' + (plan.dir_count === 1 ? '' : 's');
+            html += ', ' + size(plan.total_bytes) + ' in total.</p>';
+
+            const listed = plan.items.slice(0, 40);
+            html += '<div class="mono" style="max-height:190px;overflow:auto;margin:10px 0;padding:8px 10px;' +
+                'background:var(--bg-secondary);border:1px solid var(--line);border-radius:6px;font-size:11.5px">';
+            listed.forEach((item) => {
+                const flag = item.level === 'critical' ? ' — <span style="color:var(--danger-text)">' + esc(item.reason) + '</span>'
+                    : (!item.is_dir && !item.capturable ? ' — <span style="color:var(--warning)">not recoverable</span>' : '');
+                html += '<div>' + (item.is_dir ? '📁 ' : '') + esc(item.path) + flag + '</div>';
+            });
+            if (plan.items.length > listed.length) {
+                html += '<div style="opacity:.7">…and ' + (plan.items.length - listed.length) + ' more</div>';
+            }
+            html += '</div>';
+
+            if (plan.critical && plan.critical.length) {
+                html += '<p style="color:var(--danger-text)"><b>This includes files the server needs:</b><br>' +
+                    plan.critical.slice(0, 8).map(esc).join('<br>') + '</p>';
+            }
+
+            (plan.warnings || []).forEach((w) => {
+                html += '<p style="color:var(--warning)">' + esc(w) + '</p>';
+            });
+
+            if (plan.recoverable) {
+                html += '<p>All of it is copied to the local recycle bin first (' +
+                    size(plan.bin_free) + ' free of ' + size(plan.bin_limit) + '), so it can be restored from Vault.</p>';
+            } else {
+                html += '<p style="color:var(--danger-text)"><b>Not everything here can be recovered.</b> ' +
+                    'Whatever the recycle bin cannot hold is gone once this runs.</p>';
+            }
+
+            html += '</div>';
+            return html;
         },
-        
+
+        // Drops editor tabs for files that no longer exist, so a later Save
+        // cannot recreate a file the user deleted.
+        forgetOpenFilesUnder(roots) {
+            const paths = Array.from(this.openFiles.keys());
+            paths.forEach((path) => {
+                const gone = roots.some((root) => path === root || path.indexOf(root + '/') === 0);
+                if (gone) this.closeFileTab(path);
+            });
+        },
+
+        async renameFile() {
+            const path = this.resolvePath(this.selectedFile);
+            if (!path) return;
+
+            const current = this.selectedFile.name;
+            const v = await window.Shell.dialog.form('Rename', [
+                { name: 'name', label: 'New name', value: current, mono: true }
+            ], { confirmLabel: 'Rename' });
+            if (!v || !v.name || !v.name.trim() || v.name.trim() === current) return;
+
+            try {
+                // RenameFileStrict refuses a name that is already taken, which
+                // the panel's rename route would otherwise overwrite.
+                await window.go.main.App.RenameFileStrict(path, v.name.trim());
+                await this.refreshFiles();
+            } catch (err) {
+                await this.say('Could not rename', String(err));
+            }
+        },
+
+        async duplicateFile() {
+            const path = this.resolvePath(this.selectedFile);
+            if (!path || this.selectedFile.isDir) {
+                await this.say('Cannot duplicate', 'Pick a file. Folders cannot be duplicated from here.');
+                return;
+            }
+
+            const name = this.selectedFile.name;
+            const dot = name.lastIndexOf('.');
+            const suggested = dot > 0 ? name.slice(0, dot) + '-copy' + name.slice(dot) : name + '-copy';
+
+            const v = await window.Shell.dialog.form('Duplicate ' + this.escapeHtml(name), [
+                { name: 'name', label: 'Name for the copy', value: suggested, mono: true }
+            ], { confirmLabel: 'Duplicate' });
+            if (!v || !v.name || !v.name.trim()) return;
+
+            const target = this.currentPath === '/' ? '/' + v.name.trim() : this.currentPath + '/' + v.name.trim();
+
+            try {
+                const read = await window.go.main.App.ReadFileForEdit('', path);
+                if (read.binary || read.too_big) {
+                    await this.say('Cannot duplicate',
+                        name + ' is binary or too large to copy through the editor.');
+                    return;
+                }
+                await window.go.main.App.CreateFileStrict(target);
+                await window.go.main.App.SafeSaveFileContent(target, read.content, '', false);
+                await this.refreshFiles();
+            } catch (err) {
+                await this.say('Could not duplicate', String(err));
+            }
+        },
+
         copyPath() {
-            if (!this.selectedFile) return;
-            
-            const path = this.currentPath === '/' 
-                ? '/' + this.selectedFile.name 
-                : this.currentPath + '/' + this.selectedFile.name;
-            
+            const path = this.resolvePath(this.selectedFile);
+            if (!path) return;
             navigator.clipboard.writeText(path);
             console.log('Path copied:', path);
         },
-        
-        downloadFile() {
-            alert('Download not implemented yet');
+
+        async downloadFile() {
+            const path = this.resolvePath(this.selectedFile);
+            if (!path || this.selectedFile.isDir) {
+                await this.say('Cannot download', 'Pick a file. The panel does not serve folders as a single download.');
+                return;
+            }
+
+            try {
+                const url = await window.go.main.App.GetFileDownloadURL(path);
+                if (window.runtime && window.runtime.BrowserOpenURL) window.runtime.BrowserOpenURL(url);
+                else window.open(url, '_blank');
+            } catch (err) {
+                await this.say('Could not download', String(err));
+            }
         },
         
         showContextMenu(event, file) {
@@ -1481,7 +1786,8 @@ function initApp() {
             document.getElementById('saveBtn').style.display = 'none';
             document.getElementById('saveAllBtn').style.display = 'none';
             document.getElementById('closeBtn').style.display = 'none';
-            
+            document.getElementById('historyBtn').style.display = 'none';
+
             // Update file type
             const typeEl = document.getElementById('fileType');
             if (typeEl) {

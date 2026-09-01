@@ -1,8 +1,10 @@
 /**
- * The panel tabs that sit beside Files and Console: Databases, Backups,
- * Schedules, Users, Network, Startup, Activity and Settings. Each one loads
- * lazily the first time its tab is shown and reloads on demand, so opening the
- * app does not fire eight API calls at once.
+ * The panel tabs that sit beside Files and Console: Databases, Schedules,
+ * Users, Network, Startup, Activity and Settings. Each one loads lazily the
+ * first time its tab is shown and reloads on demand, so opening the app does
+ * not fire seven API calls at once.
+ *
+ * Backups and Reinstall are not here, and not in the Go layer either.
  */
 (function () {
     'use strict';
@@ -82,35 +84,6 @@
                 '<span class="list-actions">' +
                 '<button class="sm" data-db-rotate="' + esc(db.id) + '" type="button">Rotate password</button>' +
                 '<button class="sm danger" data-db-delete="' + esc(db.id) + '" data-name="' + esc(db.name) + '" type="button">Delete</button>' +
-                '</span></div>';
-        }));
-    });
-
-    /* ----------------------------------------------------------- backups */
-
-    const loadBackups = pane('backupsBody', async (target, api) => {
-        const items = await api.ListBackups();
-        if (!items || !items.length) {
-            return empty(target, 'No backups yet', 'A backup captures the server files at a point in time. The panel caps how many each server may keep.', 'backup');
-        }
-
-        target.innerHTML = rows(items.map((b) => {
-            const done = !!b.completed_at;
-            const tag = !done ? '<span class="tag warn">Running</span>'
-                : b.is_successful ? '<span class="tag ok">Complete</span>'
-                    : '<span class="tag bad">Failed</span>';
-            return '<div class="list-row">' +
-                '<span class="list-badge' + (done && b.is_successful ? ' on' : '') + '">' + icon(b.is_locked ? 'lock' : 'backup', 'ic-14') + '</span>' +
-                '<span class="list-main">' +
-                '<span class="list-title">' + esc(b.name) + ' ' + tag + '</span>' +
-                '<span class="list-sub">' + esc(b.uuid) + '</span>' +
-                '</span>' +
-                '<span class="list-meta"><span>' + bytes(b.bytes) + '</span><span>' + esc(when(b.created_at)) + '</span></span>' +
-                '<span class="list-actions">' +
-                (done && b.is_successful ? '<button class="sm" data-bk-download="' + esc(b.uuid) + '" type="button">Download</button>' : '') +
-                '<button class="sm" data-bk-lock="' + esc(b.uuid) + '" type="button">' + (b.is_locked ? 'Unlock' : 'Lock') + '</button>' +
-                (done && b.is_successful ? '<button class="sm" data-bk-restore="' + esc(b.uuid) + '" data-name="' + esc(b.name) + '" type="button">Restore</button>' : '') +
-                '<button class="sm danger" data-bk-delete="' + esc(b.uuid) + '" data-name="' + esc(b.name) + '" type="button">Delete</button>' +
                 '</span></div>';
         }));
     });
@@ -296,17 +269,20 @@
             '</div></div>' +
 
             '<div class="card card-pad">' +
-            '<div class="eyebrow" style="color:var(--danger-text)">Reinstall</div>' +
-            '<div class="pane-intro" style="margin:10px 0 14px">Re-runs the egg install script. Some eggs wipe the server files when they reinstall — take a backup first.</div>' +
-            '<button class="danger" id="settingsReinstallBtn" type="button">Reinstall server</button>' +
+            '<div class="eyebrow">Not available here</div>' +
+            '<div class="pane-intro" style="margin:10px 0 0">Backups and Reinstall are deliberately left out of this app. ' +
+            'A restore overwrites every file on the server and a reinstall wipes them on some eggs, and neither is ' +
+            'recoverable from the local Vault. Both are still in the panel\'s own web UI.</div>' +
             '</div>';
     });
 
     /* ---------------------------------------------------------- registry */
 
+    // No Backups entry: the backup routes are not in the Go layer at all, so a
+    // restore cannot overwrite the server's files from here. Same for
+    // Reinstall on the Settings tab.
     const LOADERS = {
         databases: loadDatabases,
-        backups: loadBackups,
         schedules: loadSchedules,
         users: loadUsers,
         network: loadNetwork,
@@ -364,34 +340,6 @@
             return;
         }
 
-        /* backups */
-        if (el.id === 'newBackupBtn') {
-            const v = await D.form('Create backup', [
-                { name: 'name', label: 'Name', placeholder: 'Leave blank for a timestamped name' },
-                { name: 'ignored', label: 'Ignored paths', placeholder: 'cache/\nlogs/', mono: true, hint: 'One glob per line, same syntax as .gitignore.' }
-            ], { confirmLabel: 'Start backup' });
-            if (v) guard(() => api.CreateBackup(v.name || '', v.ignored || ''), 'backups');
-            return;
-        }
-        if (el.dataset.bkLock) return guard(() => api.ToggleBackupLock(el.dataset.bkLock), 'backups');
-        if (el.dataset.bkDownload) {
-            return guard(async () => {
-                const url = await api.GetBackupDownloadURL(el.dataset.bkDownload);
-                if (window.runtime && window.runtime.BrowserOpenURL) window.runtime.BrowserOpenURL(url);
-                else window.open(url, '_blank');
-            });
-        }
-        if (el.dataset.bkRestore) {
-            const ok = await D.confirm('Restore backup', 'Restoring <b>' + esc(el.dataset.name) + '</b> overwrites the current server files. Stop the server first.', { danger: true, confirmLabel: 'Restore' });
-            if (ok) guard(() => api.RestoreBackup(el.dataset.bkRestore, false), 'backups');
-            return;
-        }
-        if (el.dataset.bkDelete) {
-            const ok = await D.confirm('Delete backup', 'Delete <b>' + esc(el.dataset.name) + '</b> permanently?', { danger: true, confirmLabel: 'Delete' });
-            if (ok) guard(() => api.DeleteBackup(el.dataset.bkDelete), 'backups');
-            return;
-        }
-
         /* schedules */
         if (el.dataset.scRun) return guard(() => api.ExecuteSchedule(el.dataset.scRun), 'schedules');
         if (el.dataset.scToggle) {
@@ -444,11 +392,7 @@
             const description = $('settingsDescription').value;
             return guard(() => api.RenameServer(name, description), 'settings');
         }
-        if (el.id === 'settingsReinstallBtn') {
-            const ok = await D.confirm('Reinstall server', 'This re-runs the egg install script. Some eggs delete the server files. Continue?', { danger: true, confirmLabel: 'Reinstall' });
-            if (ok) guard(() => api.ReinstallServer(), 'settings');
-            return;
-        }
+
     });
 
     window.PanelTabs = { reload, loaders: Object.keys(LOADERS) };

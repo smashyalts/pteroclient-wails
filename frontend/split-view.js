@@ -151,18 +151,35 @@
         const editor = root.querySelector('[data-role="editor"]');
         const api = go();
 
+        // Opening over unsaved work in this pane would drop it silently.
+        if (state.dirty && !(await confirmDiscard(side))) return;
+
         const full = state.path === '/' ? '/' + name : state.path + '/' + name;
         editor.value = 'Loading…';
         editor.disabled = true;
 
         try {
-            const content = await api.GetFileContentFromServer(state.serverID, full);
-            state.file = full;
-            state.original = content;
-            editor.value = content;
+            // Same guard as the main editor: a binary or oversized file loaded
+            // into a textarea comes back mangled on save.
+            const read = await api.ReadFileForEdit(state.serverID, full);
+            if (read.binary || read.too_big) {
+                editor.value = '';
+                state.file = '';
+                state.original = '';
+                await window.Shell.dialog.confirm('Cannot edit this file',
+                    read.binary
+                        ? esc(name) + ' is not valid UTF-8, so editing it here would corrupt it.'
+                        : esc(name) + ' is larger than the 8 MB editor limit.',
+                    { confirmLabel: 'OK' });
+            } else {
+                state.file = full;
+                state.original = read.content;
+                editor.value = read.content;
+            }
         } catch (err) {
             editor.value = '';
             state.file = '';
+            state.original = '';
             window.Shell.dialog.confirm('Could not open file', esc(String(err)), { confirmLabel: 'OK' });
         } finally {
             editor.disabled = false;
@@ -173,7 +190,25 @@
         markDirty(side, false);
     }
 
-    async function save(side) {
+    /** Shared prompt for the three ways a pane can lose unsaved edits. */
+    function confirmDiscard(side) {
+        const state = paneState(side);
+        return window.Shell.dialog.confirm('Unsaved changes',
+            'The ' + side + ' pane has unsaved changes to <span class="mono">' + esc(state.file) + '</span>. ' +
+            'Continuing discards them.',
+            { danger: true, confirmLabel: 'Discard them' });
+    }
+
+    /**
+     * Writes one pane back to its server.
+     *
+     * Goes through SafeSaveFileContentToServer, so the state being replaced is
+     * filed in the local history first and a file that changed on the panel
+     * since this pane opened it is refused rather than clobbered. That matters
+     * more here than in the main editor: the two panes can hold the same file
+     * on the same server, and saving one would otherwise wipe the other's work.
+     */
+    async function save(side, force) {
         const state = paneState(side);
         if (!state.serverID || !state.file) return;
 
@@ -185,7 +220,21 @@
         btn.disabled = true;
         btn.textContent = 'Saving…';
         try {
-            await api.SaveFileContentToServer(state.serverID, state.file, editor.value);
+            const res = await api.SafeSaveFileContentToServer(
+                state.serverID, state.file, editor.value, state.original, !!force);
+
+            if (res && res.conflict) {
+                btn.textContent = 'Save';
+                btn.disabled = false;
+                const ok = await window.Shell.dialog.confirm('The panel copy changed',
+                    '<span class="mono">' + esc(state.file) + '</span> ' + esc(res.reason) + '.' +
+                    '<br><br>Saving now replaces it with what is in this pane. The panel copy is filed in the ' +
+                    'local history first, so it can be restored from Vault.',
+                    { danger: true, confirmLabel: 'Overwrite anyway' });
+                if (!ok) return;
+                return save(side, true);
+            }
+
             state.original = editor.value;
             markDirty(side, false);
             btn.textContent = 'Saved';
@@ -244,7 +293,13 @@
         active = true;
     }
 
-    function close() {
+    async function close() {
+        // Closing the split view removes the textareas, so unsaved work in
+        // either pane has to be acknowledged before it goes.
+        for (const side of ['left', 'right']) {
+            if (paneState(side).dirty && !(await confirmDiscard(side))) return;
+        }
+
         const root = $('splitRoot');
         if (root) root.remove();
 
@@ -302,7 +357,7 @@
         }
     });
 
-    document.addEventListener('change', (e) => {
+    document.addEventListener('change', async (e) => {
         if (!active) return;
         const sel = e.target.closest('#splitRoot [data-role="server"]');
         if (!sel) return;
@@ -311,6 +366,13 @@
         const side = pane.getAttribute('data-side');
         const state = paneState(side);
         const opt = sel.selectedOptions[0];
+
+        // Switching servers clears the pane. Ask before throwing edits away,
+        // and put the picker back if the answer is no.
+        if (state.dirty && !(await confirmDiscard(side))) {
+            sel.value = state.serverID;
+            return;
+        }
 
         state.serverID = sel.value;
         state.serverName = opt ? opt.textContent : '';
@@ -344,14 +406,19 @@
             ? document.activeElement.closest('#splitRoot .split-pane')
             : null;
 
+        // stopPropagation, not just preventDefault: main-editor.js has its own
+        // document-level Ctrl+S handler, and preventDefault does not stop it.
+        // Without this, saving a pane also wrote the main editor's active file.
         if (e.shiftKey) {
             e.preventDefault();
+            e.stopPropagation();
             save('left');
             save('right');
             return;
         }
         if (pane) {
             e.preventDefault();
+            e.stopPropagation();
             save(pane.getAttribute('data-side'));
         }
     }, true);

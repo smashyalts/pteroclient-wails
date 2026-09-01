@@ -3,11 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"pteroclient-wails/pkg/config"
 	"pteroclient-wails/pkg/pterodactyl"
+	"pteroclient-wails/pkg/safestore"
 )
 
 // App struct
@@ -18,6 +22,14 @@ type App struct {
 	adminClient  *pterodactyl.Client       // Admin API for server listing (optional)
 	consoleWS    *pterodactyl.ConsoleWebSocket
 	serverPanelMap map[string]string // Maps server ID to panel name
+
+	// Local safety net. store holds the pre-write copies and the recycle bin;
+	// fileMu serialises every remote file mutation so two saves cannot race on
+	// the shared client's server ID. See filesafe.go.
+	store       *safestore.Store
+	fileMu      sync.Mutex
+	planMu      sync.Mutex
+	deletePlans map[string]*DeletePlan
 }
 
 // NewApp creates a new App application struct
@@ -29,6 +41,20 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.serverPanelMap = make(map[string]string)
+	a.deletePlans = make(map[string]*DeletePlan)
+
+	// The local copy store. Without it every write and delete is refused
+	// rather than performed unprotected.
+	if home, homeErr := os.UserHomeDir(); homeErr == nil {
+		store, storeErr := safestore.New(filepath.Join(home, ".pteroclient"))
+		if storeErr != nil {
+			runtime.LogError(a.ctx, "Failed to open the local file store: "+storeErr.Error())
+		} else {
+			a.store = store
+		}
+	} else {
+		runtime.LogError(a.ctx, "Failed to locate the home directory: "+homeErr.Error())
+	}
 	
 	// Initialize multi-panel config
 	var err error
@@ -98,11 +124,15 @@ func (a *App) Connect() error {
 		a.adminClient = nil
 	}
 	
-	// Create new client API client (for file operations)
+	// Create new client API client (for file operations). Replacing the client
+	// wholesale is the most disruptive thing that can happen to an in-flight
+	// file operation, so it waits for one to finish.
 	if a.ctx != nil {
 		runtime.LogInfo(a.ctx, "[CONNECT] Creating new client")
 	}
+	a.fileMu.Lock()
 	a.client = pterodactyl.NewClient(panelURL, panel.APIKey, serverID)
+	a.fileMu.Unlock()
 	
 	// Create admin API client if admin key is provided (for listing all servers)
 	if panel.AdminKey != "" {
@@ -221,9 +251,12 @@ func (a *App) SwitchServer(serverID string) error {
 		}
 	}
 	
-	// Update client server ID
+	// Update client server ID. Under fileMu: switching servers out from under
+	// an in-flight save is the same hazard as browsing during one.
+	a.fileMu.Lock()
 	a.client.SetServerID(serverID)
-	
+	a.fileMu.Unlock()
+
 	// Update config for active panel
 	a.config.UpdateActivePanelServer(serverID)
 	
@@ -239,200 +272,104 @@ func (a *App) SwitchServer(serverID string) error {
 	return nil
 }
 
-// ListFilesFromServer lists files from a specific server without switching active server
+// fileInfoToMap is the shape the file tree reads.
+func fileInfoToMap(files []pterodactyl.FileInfo) []map[string]interface{} {
+	result := make([]map[string]interface{}, len(files))
+	for i, f := range files {
+		result[i] = map[string]interface{}{
+			"name":      f.Name,
+			"size":      f.Size,
+			"mode":      f.Mode,
+			"modTime":   f.ModifiedAt,
+			"isDir":     !f.IsFile && !f.IsSymlink,
+			"isFile":    f.IsFile,
+			"isSymlink": f.IsSymlink,
+		}
+	}
+	return result
+}
+
+// ListFilesFromServer lists files on a specific server without disturbing the
+// active one. Held under fileMu like every other client operation: it repoints
+// the shared client, and doing that beside an in-flight save used to be able to
+// redirect the save.
 func (a *App) ListFilesFromServer(serverID string, path string) ([]map[string]interface{}, error) {
-	if a.client == nil {
-		return nil, fmt.Errorf("not connected")
+	cleaned, err := normalizeRemotePath(path)
+	if err != nil {
+		return nil, err
 	}
-	
-	// Check which panel this server belongs to
-	panelName, ok := a.serverPanelMap[serverID]
-	if !ok {
-		// Try to refresh mappings if server not found
-		a.RefreshAllServerMappings()
-		panelName, ok = a.serverPanelMap[serverID]
-		if !ok {
-			return nil, fmt.Errorf("server %s not found in any configured panel", serverID)
+
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	var out []map[string]interface{}
+	err = a.withServerClient(serverID, func(c *pterodactyl.Client, _ string) error {
+		files, listErr := c.ListFiles(cleaned)
+		if listErr != nil {
+			return listErr
 		}
+		out = fileInfoToMap(files)
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	
-	// If it's the current panel, use the existing client
-	if panelName == a.config.GetActivePanelName() {
-		currentServerID := a.client.GetServerID()
-		a.client.SetServerID(serverID)
-		files, err := a.client.ListFiles(path)
-		a.client.SetServerID(currentServerID)
-		
-		if err != nil {
-			return nil, err
-		}
-		
-		// Convert to map format
-		result := make([]map[string]interface{}, len(files))
-		for i, f := range files {
-			result[i] = map[string]interface{}{
-				"name":      f.Name,
-				"size":      f.Size,
-				"mode":      f.Mode,
-				"modTime":   f.ModifiedAt,
-				"isDir":     !f.IsFile && !f.IsSymlink,
-				"isFile":    f.IsFile,
-				"isSymlink": f.IsSymlink,
-			}
-		}
-		return result, nil
-	}
-	
-// Server is from a different panel - find and use that panel's credentials
-	for _, panel := range a.config.GetPanels() {
-		if panel.Name == panelName {
-			// Create a temporary client for this panel
-			// Always use the Client API key for file operations
-			panelURL := panel.PanelURL
-			if !strings.HasPrefix(panelURL, "http://") && !strings.HasPrefix(panelURL, "https://") {
-				panelURL = "https://" + panelURL
-			}
-			
-			tmpClient := pterodactyl.NewClient(panelURL, panel.APIKey, serverID)
-			files, err := tmpClient.ListFiles(path)
-			
-			if err != nil {
-				return nil, err
-			}
-			
-			// Convert to map format
-			result := make([]map[string]interface{}, len(files))
-			for i, f := range files {
-				result[i] = map[string]interface{}{
-					"name":      f.Name,
-					"size":      f.Size,
-					"mode":      f.Mode,
-					"modTime":   f.ModifiedAt,
-					"isDir":     !f.IsFile && !f.IsSymlink,
-					"isFile":    f.IsFile,
-					"isSymlink": f.IsSymlink,
-				}
-			}
-			return result, nil
-		}
-	}
-	
-	// Panel configuration not found
-	return nil, fmt.Errorf("panel configuration for server %s not found", serverID)
+	return out, nil
 }
 
-// GetFileContentFromServer gets file content from a specific server without switching active server
+// GetFileContentFromServer reads a file on a specific server without
+// disturbing the active one.
 func (a *App) GetFileContentFromServer(serverID string, path string) (string, error) {
-	if a.client == nil {
-		return "", fmt.Errorf("not connected")
+	cleaned, err := normalizeRemotePath(path)
+	if err != nil {
+		return "", err
 	}
-	
-	// Log the request for debugging
-	if a.ctx != nil {
-		runtime.LogDebugf(a.ctx, "GetFileContentFromServer called for server %s, path %s", serverID, path)
-	}
-	
-	// Check which panel this server belongs to
-	panelName, ok := a.serverPanelMap[serverID]
-	if !ok {
-		// Try to refresh mappings if server not found
-		a.RefreshAllServerMappings()
-		panelName, ok = a.serverPanelMap[serverID]
-		if !ok {
-			return "", fmt.Errorf("server %s not found in any configured panel", serverID)
+
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	var content string
+	err = a.withServerClient(serverID, func(c *pterodactyl.Client, _ string) error {
+		got, readErr := c.GetFileContent(cleaned)
+		if readErr != nil {
+			return friendlyFileError(readErr, cleaned, serverID)
 		}
+		content = got
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
-	
-	// Log panel info
-	if a.ctx != nil {
-		runtime.LogDebugf(a.ctx, "Server %s belongs to panel %s", serverID, panelName)
-	}
-	
-	// Helper function to handle errors
-	handleError := func(err error) error {
-		if err == nil {
-			return nil
-		}
-		// Check for common errors and provide better messages
-		if strings.Contains(err.Error(), "status 500") {
-			return fmt.Errorf("daemon connection error: the server daemon may be offline or experiencing issues")
-		} else if strings.Contains(err.Error(), "status 404") {
-			return fmt.Errorf("file not found: %s (server: %s)", path, serverID)
-		} else if strings.Contains(err.Error(), "status 403") {
-			return fmt.Errorf("permission denied: cannot access this file")
-		}
-		return err
-	}
-	
-	// If it's the current panel, use the existing client
-	if panelName == a.config.GetActivePanelName() {
-		currentServerID := a.client.GetServerID()
-		a.client.SetServerID(serverID)
-		content, err := a.client.GetFileContent(path)
-		a.client.SetServerID(currentServerID)
-		return content, handleError(err)
-	}
-	
-	// Server is from a different panel - find and use that panel's credentials
-	for _, panel := range a.config.GetPanels() {
-		if panel.Name == panelName {
-			// Create a temporary client for this panel
-			panelURL := panel.PanelURL
-			if !strings.HasPrefix(panelURL, "http://") && !strings.HasPrefix(panelURL, "https://") {
-				panelURL = "https://" + panelURL
-			}
-			
-			if a.ctx != nil {
-				runtime.LogDebugf(a.ctx, "Creating temp client for panel %s with URL %s, serverID %s", panelName, panelURL, serverID)
-			}
-			
-			tmpClient := pterodactyl.NewClient(panelURL, panel.APIKey, serverID)
-			content, err := tmpClient.GetFileContent(path)
-			return content, handleError(err)
-		}
-	}
-	
-	// Panel configuration not found
-	return "", fmt.Errorf("panel configuration for server %s not found", serverID)
+	return content, nil
 }
 
-// SaveFileContentToServer saves file content to a specific server without switching active server
+// friendlyFileError turns the panel's status codes into something the UI can
+// show without the reader having to know HTTP.
+func friendlyFileError(err error, path, serverID string) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case strings.Contains(err.Error(), "status 500"):
+		return fmt.Errorf("daemon connection error: the server daemon may be offline or experiencing issues")
+	case strings.Contains(err.Error(), "status 404"):
+		return fmt.Errorf("file not found: %s (server: %s)", path, serverID)
+	case strings.Contains(err.Error(), "status 403"):
+		return fmt.Errorf("permission denied: cannot access this file")
+	}
+	return err
+}
+
+// SaveFileContentToServer saves file content to a specific server without
+// switching the active server.
+//
+// It routes through the safe path in filesafe.go, so the remote bytes are
+// copied locally before they are replaced. force is implied here because this
+// entry point carries no baseline to compare against; callers that have one
+// should use SafeSaveFileContentToServer and get conflict detection too.
 func (a *App) SaveFileContentToServer(serverID string, path string, content string) error {
-	if a.client == nil {
-		return fmt.Errorf("not connected")
-	}
-	
-	// Check which panel this server belongs to
-	panelName, ok := a.serverPanelMap[serverID]
-	if !ok {
-		return fmt.Errorf("server %s not found in server map", serverID)
-	}
-	
-	// If it's the current panel, use the existing client
-	if panelName == a.config.GetActivePanelName() {
-		currentServerID := a.client.GetServerID()
-		a.client.SetServerID(serverID)
-		err := a.client.SaveFileContent(path, content)
-		a.client.SetServerID(currentServerID)
-		return err
-	}
-	
-	// Server is from a different panel - find and use that panel's credentials
-	for _, panel := range a.config.GetPanels() {
-		if panel.Name == panelName {
-			// Create a temporary client for this panel
-			panelURL := panel.PanelURL
-			if !strings.HasPrefix(panelURL, "http://") && !strings.HasPrefix(panelURL, "https://") {
-				panelURL = "https://" + panelURL
-			}
-			
-			tmpClient := pterodactyl.NewClient(panelURL, panel.APIKey, serverID)
-			return tmpClient.SaveFileContent(path, content)
-		}
-	}
-	
-	// Panel configuration not found
-	return fmt.Errorf("panel configuration for server %s not found", serverID)
+	_, err := a.SafeSaveFileContentToServer(serverID, path, content, "", true)
+	return err
 }
 
 // Panel Management Methods
@@ -686,28 +623,20 @@ func (a *App) ListFiles(path string) ([]map[string]interface{}, error) {
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[LIST_FILES] Active panel: %s", a.config.GetActivePanelName()))
 	}
 	
+	// Under fileMu so the listing cannot read a client that a save has
+	// temporarily aimed at another server.
+	a.fileMu.Lock()
 	files, err := a.client.ListFiles(path)
+	a.fileMu.Unlock()
+
 	if err != nil {
 		if a.ctx != nil {
 			runtime.LogError(a.ctx, fmt.Sprintf("[LIST_FILES] Error: %v", err))
 		}
 		return nil, err
 	}
-	
-	result := make([]map[string]interface{}, len(files))
-	for i, f := range files {
-		result[i] = map[string]interface{}{
-			"name":      f.Name,
-			"size":      f.Size,
-			"mode":      f.Mode,
-			"modTime":   f.ModifiedAt,
-			"isDir":     !f.IsFile && !f.IsSymlink,
-			"isFile":    f.IsFile,
-			"isSymlink": f.IsSymlink,
-		}
-	}
-	
-	return result, nil
+
+	return fileInfoToMap(files), nil
 }
 
 // GetFileContent gets file content
@@ -722,7 +651,10 @@ func (a *App) GetFileContent(path string) (string, error) {
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[GET_FILE] Active panel: %s", a.config.GetActivePanelName()))
 	}
 	
+	a.fileMu.Lock()
 	content, err := a.client.GetFileContent(path)
+	a.fileMu.Unlock()
+
 	if err != nil {
 		if a.ctx != nil {
 			runtime.LogError(a.ctx, fmt.Sprintf("[GET_FILE] Error: %v", err))
@@ -737,117 +669,103 @@ func (a *App) GetFileContent(path string) (string, error) {
 	return content, nil
 }
 
-// SaveFileContent saves file content
+// SaveFileContent saves file content to the active server.
+//
+// Like SaveFileContentToServer this always takes a local copy of what it is
+// about to replace. Prefer SafeSaveFileContent, which also refuses to write
+// over a file that changed on the panel since it was opened.
 func (a *App) SaveFileContent(path, content string) error {
-	if a.client == nil {
-		return fmt.Errorf("not connected")
-	}
-	
-	return a.client.SaveFileContent(path, content)
+	_, err := a.SafeSaveFileContent(path, content, "", true)
+	return err
 }
 
-// CreateFolder creates a new folder
+// CreateFolder creates a new folder. It refuses a name that is already taken
+// rather than letting the panel decide what that means.
 func (a *App) CreateFolder(path string) error {
-	if a.client == nil {
-		return fmt.Errorf("not connected")
-	}
-	
-	// Split path into directory and name
-	var dir, name string
-	lastSlash := strings.LastIndex(path, "/")
-	if lastSlash == -1 || lastSlash == 0 {
-		dir = "/"
-		name = strings.TrimPrefix(path, "/")
-	} else {
-		dir = path[:lastSlash]
-		name = path[lastSlash+1:]
-	}
-	
-	return a.client.CreateDirectory(dir, name)
+	return a.CreateFolderStrict(path)
 }
 
-// DeleteFiles deletes files or folders
+// DeleteFiles is deliberately no longer a delete.
+//
+// Deleting is a two-step handshake now: PlanDelete lists exactly what would go
+// and returns a token bound to that path set, and SafeDeleteFiles executes it
+// after copying everything into the local recycle bin. This stub stays so a
+// caller that missed the change fails loudly instead of removing files.
 func (a *App) DeleteFiles(paths []string) error {
-	if a.client == nil {
-		return fmt.Errorf("not connected")
-	}
-	
-	// Group files by directory
-	filesByDir := make(map[string][]string)
-	for _, path := range paths {
-		var dir, name string
-		lastSlash := strings.LastIndex(path, "/")
-		if lastSlash == -1 || lastSlash == 0 {
-			dir = "/"
-			name = strings.TrimPrefix(path, "/")
-		} else {
-			dir = path[:lastSlash]
-			name = path[lastSlash+1:]
-		}
-		filesByDir[dir] = append(filesByDir[dir], name)
-	}
-	
-	// Delete files in each directory
-	for dir, files := range filesByDir {
-		if err := a.client.DeleteFiles(dir, files); err != nil {
-			return err
-		}
-	}
-	
-	return nil
+	return fmt.Errorf("direct deletes are disabled: call PlanDelete to review the selection, then SafeDeleteFiles with the plan token")
 }
 
-// RenameFile renames a file or folder
+// RenameFile renames a file or folder within its directory. It refuses to
+// land on an existing name, which the panel would otherwise silently replace.
 func (a *App) RenameFile(oldPath, newPath string) error {
-	if a.client == nil {
-		return fmt.Errorf("not connected")
+	oldDir, _, err := splitRemote(oldPath)
+	if err != nil {
+		return err
 	}
-	
-	// Split paths to get directory and names
-	var dir, oldName, newName string
-	
-	// Get directory from old path
-	lastSlash := strings.LastIndex(oldPath, "/")
-	if lastSlash == -1 || lastSlash == 0 {
-		dir = "/"
-		oldName = strings.TrimPrefix(oldPath, "/")
-	} else {
-		dir = oldPath[:lastSlash]
-		oldName = oldPath[lastSlash+1:]
+	newDir, newName, err := splitRemote(newPath)
+	if err != nil {
+		return err
 	}
-	
-	// Get new name
-	lastSlash = strings.LastIndex(newPath, "/")
-	if lastSlash == -1 || lastSlash == 0 {
-		newName = strings.TrimPrefix(newPath, "/")
-	} else {
-		newName = newPath[lastSlash+1:]
+	// Moving between directories is a different operation with a different
+	// failure mode. Refuse it rather than silently renaming in place, which is
+	// what this did before.
+	if oldDir != newDir {
+		return fmt.Errorf("cannot move %s to %s: renaming only works within one directory", oldDir, newDir)
 	}
-	
-	return a.client.RenameFile(dir, oldName, newName)
+	return a.RenameFileStrict(oldPath, newName)
 }
 
-// UploadFile handles file upload
+// UploadFile writes an uploaded file into a directory.
+//
+// An upload that lands on an existing name replaces it, so the file being
+// replaced is copied locally first — the same guarantee the editor's save has.
+// overwrite must be true for that to happen at all.
 func (a *App) UploadFile(path string, content []byte) error {
-	if a.client == nil {
-		return fmt.Errorf("not connected")
+	return a.UploadFileSafe(path, content, false)
+}
+
+// UploadFileSafe is UploadFile with an explicit answer for the "a file with
+// that name is already there" case.
+func (a *App) UploadFileSafe(remotePath string, content []byte, overwrite bool) error {
+	dir, filename, err := splitRemote(remotePath)
+	if err != nil {
+		return err
 	}
-	
-	// Split path into directory and filename
-	var dir, filename string
-	lastSlash := strings.LastIndex(path, "/")
-	if lastSlash == -1 || lastSlash == 0 {
-		dir = "/"
-		filename = strings.TrimPrefix(path, "/")
-	} else {
-		dir = path[:lastSlash]
-		filename = path[lastSlash+1:]
-	}
-	
-	// Convert byte array to reader
-	reader := strings.NewReader(string(content))
-	
-	return a.client.UploadFile(dir, filename, reader)
+
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	return a.withServerClient("", func(c *pterodactyl.Client, panel string) error {
+		files, listErr := c.ListFiles(dir)
+		if listErr != nil {
+			return fmt.Errorf("cannot list %s before uploading: %w", dir, listErr)
+		}
+
+		for i := range files {
+			// Exact match, not EqualFold: the panel's filesystem is case
+			// sensitive, so Config.yml and config.yml are two files. Matching
+			// loosely here backed up the wrong one and left the one actually
+			// being replaced uncopied.
+			if files[i].Name != filename {
+				continue
+			}
+			if !overwrite {
+				return fmt.Errorf("%s already exists in %s — confirm the replacement to continue", filename, dir)
+			}
+			if !files[i].IsFile {
+				return fmt.Errorf("%s in %s is a directory; refusing to replace it with a file", filename, dir)
+			}
+			// The file being replaced goes to the recycle bin: an upload swaps
+			// the whole thing out, which is a removal, not an edit.
+			if _, captureErr := a.captureRemote(safestore.KindBin, c, panel, c.GetServerID(),
+				joinRemote(dir, files[i].Name), "replaced by an upload", files[i].Size); captureErr != nil {
+				return fmt.Errorf("refusing to upload: keeping a copy of the file it would replace failed: %w", captureErr)
+			}
+			break
+		}
+
+		return c.UploadFile(dir, filename, strings.NewReader(string(content)))
+	})
 }
 
 // cleanANSI removes ANSI escape codes
