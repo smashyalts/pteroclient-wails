@@ -1307,3 +1307,260 @@ func (a *App) GetFileDownloadURL(remotePath string) (string, error) {
 	})
 	return url, err
 }
+
+/* ------------------------------------------------------------ archives */
+
+// ArchiveResult describes the archive a compress produced.
+type ArchiveResult struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+}
+
+// archiveExtensions are stripped to name the folder an archive extracts into.
+// Longest first, so ".tar.gz" wins over ".gz".
+var archiveExtensions = []string{
+	".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst",
+	".tgz", ".tbz2", ".txz", ".zip", ".tar", ".gz", ".rar", ".7z",
+}
+
+// CompressFiles archives a selection into a new tar.gz beside it.
+//
+// Every path has to sit in the same directory, which is what the file tree
+// hands over anyway: the panel's compress route takes one root and a list of
+// names within it.
+func (a *App) CompressFiles(paths []string) (*ArchiveResult, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("nothing selected")
+	}
+
+	var root string
+	names := make([]string, 0, len(paths))
+	seen := map[string]bool{}
+
+	for _, p := range paths {
+		dir, name, err := splitRemote(p)
+		if err != nil {
+			return nil, err
+		}
+		if root == "" {
+			root = dir
+		} else if dir != root {
+			return nil, fmt.Errorf("everything being archived has to be in one folder; %s is not in %s", p, root)
+		}
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	out := &ArchiveResult{}
+	err := a.withServerClient("", func(c *pterodactyl.Client, _ string) error {
+		attrs, compressErr := c.CompressFiles(root, names)
+		if compressErr != nil {
+			return compressErr
+		}
+		if name, ok := attrs["name"].(string); ok {
+			out.Name = name
+			out.Path = joinRemote(root, name)
+		}
+		if size, ok := attrs["size"].(float64); ok {
+			out.Size = int64(size)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	if out.Name == "" {
+		return nil, errors.New("the panel did not say what it named the archive")
+	}
+	return out, nil
+}
+
+// DecompressFile extracts an archive and returns the folder it landed in.
+//
+// intoNewFolder is the safe form and the one the UI defaults to: the archive
+// is moved into a fresh folder named after it, extracted there, and moved back
+// out. Extracting in place is the only file operation here that can replace a
+// file without the local store getting a copy first — the archive decides what
+// it writes, and there is no way to know before it runs — so the caller has to
+// ask for it explicitly.
+func (a *App) DecompressFile(remotePath string, intoNewFolder bool) (string, error) {
+	dir, name, err := splitRemote(remotePath)
+	if err != nil {
+		return "", err
+	}
+
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	target := dir
+
+	err = a.withServerClient("", func(c *pterodactyl.Client, _ string) error {
+		if !intoNewFolder {
+			return c.DecompressFile(dir, name)
+		}
+
+		existing, listErr := c.ListFiles(dir)
+		if listErr != nil {
+			return fmt.Errorf("cannot list %s: %w", dir, listErr)
+		}
+		taken := map[string]bool{}
+		for _, f := range existing {
+			taken[strings.ToLower(f.Name)] = true
+		}
+
+		folder := uniqueFolderName(archiveBaseName(name), taken)
+		if createErr := c.CreateDirectory(dir, folder); createErr != nil {
+			return fmt.Errorf("cannot create %s: %w", joinRemote(dir, folder), createErr)
+		}
+		target = joinRemote(dir, folder)
+
+		// The panel's decompress route only reads an archive inside the root
+		// it extracts into, so the archive goes in and comes back out.
+		inner := folder + "/" + name
+		if moveErr := c.RenameFile(dir, name, inner); moveErr != nil {
+			return fmt.Errorf("cannot move the archive into %s: %w", target, moveErr)
+		}
+
+		decompressErr := c.DecompressFile(target, name)
+
+		// Put it back either way, so a failed extract does not leave the
+		// archive buried in a folder the user did not ask for.
+		if moveBackErr := c.RenameFile(dir, inner, name); moveBackErr != nil && decompressErr == nil {
+			return fmt.Errorf("extracted into %s, but the archive could not be moved back: %w", target, moveBackErr)
+		}
+		return decompressErr
+	})
+	if err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+// archiveBaseName strips one archive extension from a filename.
+func archiveBaseName(name string) string {
+	lower := strings.ToLower(name)
+	for _, ext := range archiveExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return name[:len(name)-len(ext)]
+		}
+	}
+	return name
+}
+
+// uniqueFolderName appends a counter until the name is free.
+func uniqueFolderName(base string, taken map[string]bool) string {
+	if base == "" {
+		base = "extracted"
+	}
+	if !taken[strings.ToLower(base)] {
+		return base
+	}
+	for i := 2; i < 1000; i++ {
+		candidate := fmt.Sprintf("%s-%d", base, i)
+		if !taken[strings.ToLower(candidate)] {
+			return candidate
+		}
+	}
+	return base + "-extracted"
+}
+
+/* --------------------------------------------------------- console logs */
+
+// commonLogPaths are where the eggs this app gets pointed at keep their log.
+// The websocket only replays what wings has buffered — a few dozen lines — so
+// anything older has to come from the file itself.
+var commonLogPaths = []string{
+	"/logs/latest.log",
+	"/logs/console.log",
+	"/latest.log",
+	"/server.log",
+	"/console.log",
+	"/proxy.log.0",
+	"/logs/server.log",
+}
+
+// LogTail is the end of a server's log file.
+type LogTail struct {
+	Path      string `json:"path"`
+	Content   string `json:"content"`
+	Lines     int    `json:"lines"`
+	Truncated bool   `json:"truncated"`
+	Found     bool   `json:"found"`
+}
+
+// GetServerLogTail returns the last maxLines of whichever log file the server
+// keeps, so the console can show history the websocket never sends.
+func (a *App) GetServerLogTail(maxLines int) (*LogTail, error) {
+	if maxLines <= 0 || maxLines > 5000 {
+		maxLines = 1000
+	}
+
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	out := &LogTail{}
+
+	err := a.withServerClient("", func(c *pterodactyl.Client, _ string) error {
+		for _, candidate := range commonLogPaths {
+			dir, name, splitErr := splitRemote(candidate)
+			if splitErr != nil {
+				continue
+			}
+
+			files, listErr := c.ListFiles(dir)
+			if listErr != nil {
+				continue
+			}
+
+			var size int64 = -1
+			for i := range files {
+				if files[i].Name == name && files[i].IsFile {
+					size = files[i].Size
+					break
+				}
+			}
+			if size < 0 {
+				continue
+			}
+			if size > EditorMaxOpenBytes {
+				// A log this big would be most of a save's worth of bandwidth
+				// for lines nobody scrolls back to.
+				out.Path = candidate
+				out.Found = true
+				out.Truncated = true
+				out.Content = fmt.Sprintf("(%s is %s — too large to load here; open it from the Files tab)",
+					candidate, humanBytes(size))
+				return nil
+			}
+
+			content, readErr := c.GetFileContent(candidate)
+			if readErr != nil {
+				continue
+			}
+
+			lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+			if len(lines) > maxLines {
+				lines = lines[len(lines)-maxLines:]
+				out.Truncated = true
+			}
+
+			out.Path = candidate
+			out.Found = true
+			out.Lines = len(lines)
+			out.Content = strings.Join(lines, "\n")
+			return nil
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}

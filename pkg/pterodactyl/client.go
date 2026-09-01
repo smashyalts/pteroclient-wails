@@ -629,3 +629,60 @@ func (c *Client) GetWebSocketCredentials() (*WebSocketCredentials, error) {
 	
 	return &response.Data, nil
 }
+
+// CompressFiles archives files and directories inside root into a new
+// tar.gz that the panel names and places in root. Returns the archive's
+// attributes, whose "name" is the generated filename.
+func (c *Client) CompressFiles(root string, files []string) (map[string]interface{}, error) {
+	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/compress", c.baseURL, c.serverID)
+
+	resp, err := c.client.R().
+		SetBody(map[string]interface{}{
+			"root":  root,
+			"files": files,
+		}).
+		Post(endpoint)
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to compress: %w", err)
+	}
+
+	if resp.StatusCode() < 200 || resp.StatusCode() > 299 {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode(), resp.String())
+	}
+
+	var parsed struct {
+		Attributes map[string]interface{} `json:"attributes"`
+	}
+	if err := json.Unmarshal(resp.Body(), &parsed); err != nil {
+		return nil, fmt.Errorf("failed to parse compress response: %w", err)
+	}
+	return parsed.Attributes, nil
+}
+
+// DecompressFile extracts an archive into root. file is the archive's name
+// relative to root.
+//
+// Extraction is the one file operation whose effect cannot be predicted from
+// the outside: the archive decides what it writes, so a file it happens to
+// contain replaces the one already there with no chance to copy it first. The
+// caller is expected to have said so.
+func (c *Client) DecompressFile(root, file string) error {
+	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/decompress", c.baseURL, c.serverID)
+
+	resp, err := c.client.R().
+		SetBody(map[string]string{
+			"root": root,
+			"file": file,
+		}).
+		Post(endpoint)
+
+	if err != nil {
+		return fmt.Errorf("failed to decompress: %w", err)
+	}
+
+	if resp.StatusCode() < 200 || resp.StatusCode() > 299 {
+		return fmt.Errorf("API returned status %d: %s", resp.StatusCode(), resp.String())
+	}
+	return nil
+}

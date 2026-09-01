@@ -104,6 +104,7 @@
         <div id="consoleTab" class="tab-content active">
             <div class="console-toolbar">
                 <button onclick="window.app.connectConsole()" id="connectBtn" type="button">Connect</button>
+                <button onclick="window.app.loadServerLog()" type="button" title="Read the server's log file — the websocket only replays what wings still has buffered">Load log</button>
                 <button onclick="window.app.clearConsole()" type="button">Clear</button>
                 <div class="power-controls">
                     <span class="eyebrow" style="margin-right: 4px;">Power</span>
@@ -131,14 +132,26 @@
             <div class="toolbar">
                 <div class="path-bar" id="pathBar"></div>
                 <input type="text" id="currentPath" value="/" readonly>
+
+                <!-- Only present while something is picked; ctrl/shift-click
+                     multi-selects and the count is what you check before
+                     pressing Delete. -->
+                <div class="selection-bar" id="selectionBar" hidden>
+                    <span class="selection-count" id="selectionCount"></span>
+                    <button onclick="window.app.archiveSelected()" type="button" class="sm" title="Archive selected (Ctrl+Shift+A)">Archive</button>
+                    <button onclick="window.app.extractSelected()" type="button" class="sm" title="Extract archive (Ctrl+Shift+E)">Extract</button>
+                    <button onclick="window.app.clearSelection()" type="button" class="sm" title="Clear selection (Esc)">Clear</button>
+                </div>
+
                 <div class="spacer"></div>
-                <button onclick="window.app.refreshFiles()" type="button" id="filesRefreshBtn">Refresh</button>
-                <button onclick="window.app.uploadFile()" type="button" id="filesUploadBtn">Upload</button>
-                <button onclick="window.app.newFolder()" type="button" class="icon-only" title="New folder" id="filesNewFolderBtn"></button>
-                <button onclick="window.app.newFile()" type="button" class="icon-only" title="New file" id="filesNewFileBtn"></button>
-                <button onclick="window.app.deleteSelected()" class="danger icon-only" title="Delete selected" type="button" id="filesDeleteBtn"></button>
+                <button onclick="window.app.refreshFiles()" type="button" id="filesRefreshBtn" title="Refresh (F5)">Refresh</button>
+                <button onclick="window.app.uploadFile()" type="button" id="filesUploadBtn" title="Upload (Ctrl+U)">Upload</button>
+                <button onclick="window.app.newFolder()" type="button" class="icon-only" title="New folder (Ctrl+Shift+N)" id="filesNewFolderBtn"></button>
+                <button onclick="window.app.newFile()" type="button" class="icon-only" title="New file (Ctrl+N)" id="filesNewFileBtn"></button>
+                <button onclick="window.app.deleteSelected()" class="danger icon-only" title="Delete selected (Del)" type="button" id="filesDeleteBtn"></button>
                 <div class="header-divider"></div>
-                <button id="splitViewBtn" type="button" title="Toggle split view">Split view</button>
+                <button onclick="window.app.cycleTreeDock()" type="button" class="icon-only" title="Move the file tree (Ctrl+Shift+B)" id="filesDockBtn"></button>
+                <button id="splitViewBtn" type="button" title="Toggle split view (Ctrl+\)">Split view</button>
             </div>
 
             <div class="file-manager">
@@ -273,6 +286,9 @@
     <div class="menu-item" onclick="window.app.copyPath()">Copy path</div>
     <div class="menu-item" onclick="window.app.downloadFile()">Download</div>
     <div class="separator"></div>
+    <div class="menu-item" onclick="window.app.archiveSelected()">Archive selection</div>
+    <div class="menu-item" onclick="window.app.extractSelected()">Extract archive</div>
+    <div class="separator"></div>
     <div class="menu-item danger" onclick="window.app.deleteFile()">Delete</div>
 </div>
 
@@ -330,9 +346,44 @@
     </div>
 </div>
 
+<!-- Command palette ===================================================== -->
+<div id="palette" class="palette">
+    <div class="palette-box">
+        <input type="text" id="paletteInput" autocomplete="off" spellcheck="false"
+               placeholder="Type a command or a server name…">
+        <div class="palette-list" id="paletteList"></div>
+        <div class="palette-foot">
+            <span><kbd>↑</kbd><kbd>↓</kbd> move</span>
+            <span><kbd>Enter</kbd> run</span>
+            <span><kbd>Esc</kbd> close</span>
+            <span class="spacer"></span>
+            <span>prefix <kbd>&gt;</kbd> for servers only</span>
+        </div>
+    </div>
+</div>
+
+<!-- Hotkeys ============================================================== -->
+<div id="hotkeyModal" class="modal">
+    <div class="modal-content" style="width: 640px;">
+        <div class="modal-header">
+            <h2>Hotkeys</h2>
+            <button class="close" onclick="document.getElementById('hotkeyModal').classList.remove('show')" type="button">&times;</button>
+        </div>
+        <div class="modal-body" id="hotkeyBody"></div>
+        <div class="modal-footer">
+            <button data-hotkey-reset-all type="button">Reset all to defaults</button>
+            <button class="primary" onclick="document.getElementById('hotkeyModal').classList.remove('show')" type="button">Done</button>
+        </div>
+    </div>
+</div>
+
+<!-- Toasts =============================================================== -->
+<div id="toastHost" class="toast-host"></div>
+
 <input type="file" id="fileInput" class="hidden" multiple>
 
 <script src="./icons.js"></script>
+<script src="./ux.js"></script>
 <script src="./main-editor.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>
 <script src="./monaco-integrated.js"></script>
@@ -340,5 +391,6 @@
 <script src="./panel-tabs.js"></script>
 <script src="./split-view.js"></script>
 <script src="./vault.js"></script>
+<script src="./commands.js"></script>
 </body>
 </html>

@@ -1503,3 +1503,330 @@ textarea.mono {
     background: var(--accent-dim, rgba(120, 160, 255, .14));
     color: var(--accent);
 }
+
+/* ========================================================================
+   Toasts
+   ==================================================================== */
+
+.toast-host {
+    position: fixed;
+    right: 18px;
+    bottom: 18px;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    align-items: flex-end;
+    pointer-events: none;
+}
+
+.toast {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    max-width: 460px;
+    padding: 10px 12px 10px 14px;
+    border: 1px solid var(--line-strong);
+    border-left: 3px solid var(--accent);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .45);
+    font-size: 12.5px;
+    line-height: 1.5;
+    color: var(--text-primary);
+    pointer-events: auto;
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity .18s ease, transform .18s ease;
+}
+
+.toast.in { opacity: 1; transform: translateY(0); }
+.toast.leaving { opacity: 0; transform: translateY(8px); }
+
+.toast-ok { border-left-color: var(--success); }
+.toast-warn { border-left-color: var(--warning); }
+.toast-bad { border-left-color: var(--danger); }
+
+.toast-body { flex: 1; min-width: 0; }
+
+.toast-action {
+    flex: none;
+    height: 24px;
+    padding: 0 10px;
+    font-size: 11.5px;
+    font-weight: 600;
+}
+
+.toast-close {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text-faint);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.toast-close:hover { color: var(--text-primary); background: none; }
+
+/* ========================================================================
+   Command palette
+   ==================================================================== */
+
+.palette {
+    position: fixed;
+    inset: 0;
+    z-index: 1500;
+    display: none;
+    justify-content: center;
+    align-items: flex-start;
+    padding-top: 14vh;
+    background: rgba(0, 0, 0, .55);
+}
+
+.palette.show { display: flex; }
+
+.palette-box {
+    width: min(620px, 92vw);
+    max-height: 62vh;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    background: var(--bg-secondary);
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .55);
+    overflow: hidden;
+}
+
+#paletteInput {
+    height: 46px;
+    padding: 0 16px;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    border-radius: 0;
+    background: transparent;
+    font-size: 14px;
+}
+
+#paletteInput:focus { outline: none; box-shadow: none; }
+
+.palette-list { flex: 1; overflow-y: auto; padding: 6px; }
+
+.palette-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+}
+
+.palette-row.active { background: var(--bg-hover); color: var(--text-primary); }
+.palette-row:hover { background: var(--bg-hover); }
+.palette-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.palette-current {
+    flex: none;
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    background: rgba(255, 255, 255, .07);
+    color: var(--text-faint);
+}
+
+.palette-hint { flex: none; font-size: 11px; color: var(--text-faint); }
+.palette-empty { padding: 22px; text-align: center; font-size: 12.5px; color: var(--text-faint); }
+
+.palette-foot {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 8px 14px;
+    border-top: 1px solid var(--line);
+    font-size: 11px;
+    color: var(--text-faint);
+}
+
+.palette-foot .spacer { flex: 1; }
+
+kbd {
+    display: inline-block;
+    min-width: 16px;
+    margin-right: 3px;
+    padding: 1px 5px;
+    border: 1px solid var(--line-strong);
+    border-bottom-width: 2px;
+    border-radius: 4px;
+    background: var(--bg-primary);
+    font-family: monospace;
+    font-size: 10.5px;
+    text-align: center;
+    color: var(--text-dim);
+}
+
+button.recording { border-color: var(--accent); color: var(--accent); }
+
+/* ========================================================================
+   File tree: press feedback, docking
+   ==================================================================== */
+
+/* Clicking a row used to do nothing visible until the file had loaded,
+   which on a slow panel read as a dead click. */
+@keyframes filePress {
+    0%   { background: var(--bg-hover); transform: scale(.995); }
+    100% { background: transparent; transform: scale(1); }
+}
+
+.file-item { transition: background .12s ease; }
+.file-item.pressed { animation: filePress .28s ease-out; }
+.file-item.opening .file-name { opacity: .55; }
+
+.file-manager.dock-right { flex-direction: row-reverse; }
+.file-manager.dock-bottom { flex-direction: column-reverse; }
+
+.file-manager.dock-bottom > .file-tree {
+    width: auto;
+    height: 220px;
+    min-height: 120px;
+    border-right: 0;
+    border-top: 1px solid var(--line);
+}
+
+.file-manager.dock-hidden > .file-tree { display: none !important; }
+
+.file-manager.dock-right > .file-tree {
+    border-right: 0;
+    border-left: 1px solid var(--line);
+}
+
+/* ========================================================================
+   Selection bar
+   ==================================================================== */
+
+.selection-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: 10px;
+    padding-left: 12px;
+    border-left: 1px solid var(--line-strong);
+}
+
+.selection-count {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--accent);
+    white-space: nowrap;
+}
+
+/* ========================================================================
+   Split view
+   ==================================================================== */
+
+#splitRoot {
+    display: flex;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+}
+
+.split-tree {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--line);
+}
+
+.split-tree-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 40px;
+    flex: none;
+    padding: 0 10px;
+    border-bottom: 1px solid var(--line);
+}
+
+.split-tree-head .spacer { flex: 1; }
+
+.split-tree-path {
+    flex: none;
+    padding: 6px 10px;
+    font-size: 11px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.split-tree-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; }
+
+.split-pane {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    border-left: 1px solid var(--line-strong);
+}
+
+.split-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    height: 40px;
+    flex: none;
+    padding: 0 12px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--line);
+}
+
+.split-focus {
+    width: 6px;
+    height: 6px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--line-strong);
+}
+
+.split-pane.focused .split-focus {
+    background: var(--accent);
+    box-shadow: 0 0 0 3px rgba(120, 160, 255, .18);
+}
+
+.split-pane.focused .split-head { background: var(--bg-hover); }
+
+.split-server { width: auto; min-width: 150px; max-width: 220px; height: 26px; font-size: 11.5px; }
+
+.split-file {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+}
+
+.split-dirty { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+.split-body { position: relative; flex: 1; min-height: 0; display: flex; }
+.split-body .editor-textarea { flex: 1; }
+
+/* Drag handles between the three columns. */
+.split-grip {
+    flex: none;
+    width: 5px;
+    cursor: col-resize;
+    background: transparent;
+    transition: background .12s ease;
+}
+
+.split-grip:hover { background: var(--accent); }
+body.resizing { cursor: col-resize; user-select: none; }
+body.resizing .split-grip { background: var(--accent); }

@@ -324,14 +324,12 @@ function replaceEditor() {
                 }
             });
             
-            // Add keyboard shortcuts
-            monacoEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-                if (app.saveFile) app.saveFile();
-            });
-            
-            monacoEditor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.KeyS, () => {
-                if (app.saveAllFiles) app.saveAllFiles();
-            });
+            // No save bindings here on purpose. Monaco's addCommand fires on
+            // its own keydown and the event still bubbles to document, so
+            // registering Ctrl+S here as well as in the hotkey manager saved
+            // the file twice — two writes and two entries in the history.
+            // commands.js owns it; the manager lets it through inside Monaco
+            // because that command is marked allowInField.
             
             console.log('Monaco Editor created successfully');
         },

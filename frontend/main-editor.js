@@ -131,12 +131,23 @@ function initApp() {
     // Main app object
     const app = {
         currentPath: '/',
-        // selectedFile carries the full remote path it was rendered with, so a
-        // later navigation cannot repoint a stale selection at a same-named
-        // file in another directory. Deleting used to rebuild the path from
+        // selection holds every picked row as path -> entry. Each entry
+        // carries the full remote path it was rendered with, so a later
+        // navigation cannot repoint a stale selection at a same-named file in
+        // another directory. Deleting used to rebuild the path from
         // currentPath at click time, which did exactly that.
+        selection: new Map(),
+        // The row clicked last. Anchors shift-select, and is what the context
+        // menu and the single-target actions act on.
         selectedFile: null,
         contextFile: null,
+        // Rendered order, so a shift-click knows what lies between two rows.
+        renderedRows: [],
+        // 'left' | 'right' | 'bottom' | 'hidden'
+        treeDock: 'left',
+        // Console command history, oldest first.
+        commandHistory: [],
+        commandCursor: -1,
         isConnected: false,
         consoleConnected: false,
         // Set while the panel form is editing an existing panel rather than
@@ -262,38 +273,58 @@ function initApp() {
             }
         },
         
+        // Shortcuts live in commands.js, driven by the manager in ux.js.
+        // They used to be here, in split-view.js and inside Monaco all at once,
+        // which is how Ctrl+S in a split pane also saved the main editor's file:
+        // nothing could see the whole set.
         setupKeyboardShortcuts() {
-            document.addEventListener('keydown', (e) => {
-                // Ctrl+S - Save
-                if (e.ctrlKey && e.key === 's') {
-                    e.preventDefault();
-                    if (e.shiftKey) {
-                        this.saveAllFiles();
-                    } else {
-                        this.saveFile();
-                    }
-                }
-                // Ctrl+W - Close file
-                if (e.ctrlKey && e.key === 'w') {
-                    e.preventDefault();
-                    this.closeFile();
-                }
-                // Ctrl+N - New file
-                if (e.ctrlKey && e.key === 'n') {
-                    e.preventDefault();
-                    this.newFile();
-                }
-                // Alt+Left - Navigate back
-                if (e.altKey && e.key === 'ArrowLeft') {
-                    e.preventDefault();
-                    this.navigateBack();
-                }
-                // Alt+Right - Navigate forward
-                if (e.altKey && e.key === 'ArrowRight') {
-                    e.preventDefault();
-                    this.navigateForward();
-                }
-            });
+            this.restoreCommandHistory();
+            this.restoreTreeDock();
+        },
+
+        restoreCommandHistory() {
+            try {
+                const raw = localStorage.getItem('consoleHistory');
+                this.commandHistory = raw ? JSON.parse(raw) : [];
+            } catch (err) {
+                this.commandHistory = [];
+            }
+            if (!Array.isArray(this.commandHistory)) this.commandHistory = [];
+            this.commandCursor = this.commandHistory.length;
+        },
+
+        rememberCommand(command) {
+            // Repeating the last command should not grow the list.
+            if (this.commandHistory[this.commandHistory.length - 1] !== command) {
+                this.commandHistory.push(command);
+            }
+            if (this.commandHistory.length > 200) {
+                this.commandHistory = this.commandHistory.slice(-200);
+            }
+            this.commandCursor = this.commandHistory.length;
+            try {
+                localStorage.setItem('consoleHistory', JSON.stringify(this.commandHistory));
+            } catch (err) { /* private mode */ }
+        },
+
+        // Up and down walk the history the way a shell does: the draft you were
+        // typing is kept, so stepping back and forward again returns it.
+        recallCommand(delta) {
+            const input = document.getElementById('commandInput');
+            if (!input || !this.commandHistory.length) return;
+
+            if (this.commandCursor === this.commandHistory.length) this.commandDraft = input.value;
+
+            const next = Math.min(this.commandHistory.length, Math.max(0, this.commandCursor + delta));
+            if (next === this.commandCursor) return;
+            this.commandCursor = next;
+
+            input.value = next === this.commandHistory.length
+                ? (this.commandDraft || '')
+                : this.commandHistory[next];
+
+            // Caret to the end, so editing a recalled command is immediate.
+            requestAnimationFrame(() => input.setSelectionRange(input.value.length, input.value.length));
         },
         
         setupEventListeners() {
@@ -304,6 +335,7 @@ function initApp() {
                 this.updateStatus(connected);
                 if (connected) {
                     this.loadFiles('/');
+                    this.ensureConsole();
                 }
             });
             
@@ -333,12 +365,16 @@ function initApp() {
                 this.currentPath = '/';
                 this.navigationHistory = ['/'];
                 this.navigationIndex = 0;
-                this.appendConsole('=== Switched to server: ' + serverID + ' ===', 'info');
                 // Clear console and reload files for the new server
                 this.clearConsole();
+                this.appendConsole('=== Switched to server: ' + serverID + ' ===', 'info');
                 this.loadFiles('/');
                 // Close all open files as they belong to the previous server
                 this.closeAllFiles();
+                // SwitchServer drops the old console; bring the new one up
+                // rather than making the Connect button a required step.
+                this.consoleConnected = false;
+                this.ensureConsole();
             });
             
             window.runtime.EventsOn('panel-changed', (panelName) => {
@@ -366,6 +402,14 @@ function initApp() {
             const commandInput = document.getElementById('commandInput');
             if (commandInput) {
                 commandInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'ArrowUp') {
+                        e.preventDefault();
+                        return this.recallCommand(-1);
+                    }
+                    if (e.key === 'ArrowDown') {
+                        e.preventDefault();
+                        return this.recallCommand(1);
+                    }
                     if (e.key === 'Enter') {
                         this.sendCommand();
                     }
@@ -526,8 +570,9 @@ function initApp() {
         renderFiles(files) {
             const tree = document.getElementById('fileTree');
             if (!tree) return;
-            
+
             tree.innerHTML = '';
+            this.renderedRows = [];
             
             // Sort files
             files.sort((a, b) => {
@@ -550,6 +595,8 @@ function initApp() {
                 const item = this.createFileItem(file);
                 tree.appendChild(item);
             });
+
+            this.updateSelectionUI();
             
             if (files.length === 0 && this.currentPath === '/') {
                 tree.innerHTML = '<div class="preview-empty">No files found</div>';
@@ -586,46 +633,160 @@ function initApp() {
             div.appendChild(name);
             div.appendChild(size);
             
-            div.addEventListener('click', () => {
+            // Press feedback. Clicking a row used to do nothing visible until
+            // the file had loaded, which on a slow panel read as a dead click.
+            div.addEventListener('pointerdown', () => {
+                div.classList.remove('pressed');
+                // Restart the animation rather than letting a repeat click be
+                // swallowed by the class already being there.
+                void div.offsetWidth;
+                div.classList.add('pressed');
+            });
+            div.addEventListener('animationend', () => div.classList.remove('pressed'));
+
+            if (!isParent) this.renderedRows.push({ path: fullPath, entry: entry, el: div });
+
+            div.addEventListener('click', (e) => {
                 if (isParent) {
                     const parts = this.currentPath.split('/').filter(p => p);
                     parts.pop();
                     const parentPath = '/' + parts.join('/');
                     this.loadFiles(parentPath || '/');
-                } else if (file.isDir) {
+                    return;
+                }
+
+                // Ctrl toggles one row, Shift takes the run from the anchor.
+                // Neither opens anything: picking several files and having the
+                // last one load its content is not what was asked for.
+                if (e.ctrlKey || e.metaKey) {
+                    this.toggleSelected(entry);
+                    return;
+                }
+                if (e.shiftKey) {
+                    this.selectRangeTo(entry);
+                    return;
+                }
+
+                this.markSelected(div, entry);
+                if (file.isDir) {
+                    div.classList.add('opening');
                     this.loadFiles(fullPath);
                 } else {
-                    this.markSelected(div, entry);
                     this.openFile(entry);
                 }
             });
-            
+
             div.addEventListener('contextmenu', (e) => {
                 e.preventDefault();
-                if (!isParent) {
-                    this.markSelected(div, entry);
-                    this.showContextMenu(e, entry);
-                }
+                if (isParent) return;
+                // Right-clicking inside an existing selection keeps it, so the
+                // menu can act on all of it.
+                if (!this.selection.has(fullPath)) this.markSelected(div, entry);
+                else this.selectedFile = entry;
+                this.showContextMenu(e, entry);
             });
-            
+
             return div;
         },
         
         markSelected(row, entry) {
-            document.querySelectorAll('.file-item').forEach(item => {
-                item.classList.remove('selected');
-            });
-            if (row) row.classList.add('selected');
+            this.selection.clear();
+            if (entry && entry.path) this.selection.set(entry.path, entry);
             this.selectedFile = entry;
             this.contextFile = entry;
+            this.paintSelection();
+        },
+
+        toggleSelected(entry) {
+            if (!entry || !entry.path) return;
+            if (this.selection.has(entry.path)) {
+                this.selection.delete(entry.path);
+                if (this.selectedFile && this.selectedFile.path === entry.path) {
+                    const last = Array.from(this.selection.values()).pop();
+                    this.selectedFile = last || null;
+                }
+            } else {
+                this.selection.set(entry.path, entry);
+                this.selectedFile = entry;
+            }
+            this.contextFile = this.selectedFile;
+            this.paintSelection();
+        },
+
+        // Shift-click takes everything between the last plain click and here,
+        // in the order the rows are rendered.
+        selectRangeTo(entry) {
+            if (!entry || !entry.path) return;
+
+            const paths = this.renderedRows.map(r => r.path);
+            const to = paths.indexOf(entry.path);
+            const anchor = this.selectedFile ? paths.indexOf(this.selectedFile.path) : -1;
+
+            if (to === -1) return;
+            if (anchor === -1) return this.markSelected(null, entry);
+
+            const from = Math.min(anchor, to);
+            const until = Math.max(anchor, to);
+
+            this.selection.clear();
+            for (let i = from; i <= until; i++) {
+                this.selection.set(this.renderedRows[i].path, this.renderedRows[i].entry);
+            }
+            this.contextFile = entry;
+            this.paintSelection();
+        },
+
+        selectAllFiles() {
+            this.selection.clear();
+            this.renderedRows.forEach(r => this.selection.set(r.path, r.entry));
+            this.selectedFile = this.renderedRows.length
+                ? this.renderedRows[this.renderedRows.length - 1].entry
+                : null;
+            this.contextFile = this.selectedFile;
+            this.paintSelection();
         },
 
         clearSelection() {
+            this.selection.clear();
             this.selectedFile = null;
             this.contextFile = null;
-            document.querySelectorAll('.file-item.selected').forEach(item => {
-                item.classList.remove('selected');
+            this.paintSelection();
+        },
+
+        paintSelection() {
+            document.querySelectorAll('#fileTree .file-item').forEach(item => {
+                item.classList.toggle('selected', this.selection.has(item.dataset.path));
             });
+            this.updateSelectionUI();
+        },
+
+        // The toolbar summary. Without it a multi-row selection is only visible
+        // as highlighting, and the count matters before pressing Delete.
+        updateSelectionUI() {
+            const bar = document.getElementById('selectionBar');
+            if (!bar) return;
+
+            const count = this.selection.size;
+            bar.hidden = count === 0;
+            if (!count) return;
+
+            let dirs = 0;
+            this.selection.forEach(entry => { if (entry.isDir) dirs++; });
+
+            const label = count === 1
+                ? (this.selectedFile ? this.selectedFile.name : '1 item')
+                : count + ' selected' + (dirs ? ' (' + dirs + ' folder' + (dirs === 1 ? '' : 's') + ')' : '');
+
+            const countEl = document.getElementById('selectionCount');
+            if (countEl) countEl.textContent = label;
+        },
+
+        // Paths for whatever is selected, in rendered order.
+        selectionPaths() {
+            const ordered = this.renderedRows
+                .filter(r => this.selection.has(r.path))
+                .map(r => r.path);
+            return ordered.length ? ordered : Array.from(this.selection.keys());
         },
 
         // Every path the UI hands to the backend goes through here first. The
@@ -755,7 +916,19 @@ function initApp() {
             tab.appendChild(closeBtn);
             
             tab.onclick = () => this.switchToFile(path);
-            
+
+            // Middle-click closes, the way it does in every editor with tabs.
+            // auxclick is the event that actually fires for button 1; mousedown
+            // is suppressed only to stop the browser's autoscroll cursor.
+            tab.addEventListener('auxclick', (e) => {
+                if (e.button !== 1) return;
+                e.preventDefault();
+                this.closeFileTab(path);
+            });
+            tab.addEventListener('mousedown', (e) => {
+                if (e.button === 1) e.preventDefault();
+            });
+
             tabsContainer.appendChild(tab);
         },
         
@@ -1016,6 +1189,30 @@ function initApp() {
             }
         },
         
+        // The tree can sit on either side, along the bottom, or be folded away
+        // for a full-width editor.
+        applyTreeDock(dock) {
+            const manager = document.querySelector('.file-manager');
+            if (!manager) return;
+            ['dock-left', 'dock-right', 'dock-bottom', 'dock-hidden'].forEach(c => manager.classList.remove(c));
+            manager.classList.add('dock-' + dock);
+            this.treeDock = dock;
+            try { localStorage.setItem('treeDock', dock); } catch (err) { /* private mode */ }
+        },
+
+        cycleTreeDock() {
+            const order = ['left', 'right', 'bottom', 'hidden'];
+            const next = order[(order.indexOf(this.treeDock) + 1) % order.length];
+            this.applyTreeDock(next);
+            window.UX.toast.show('File tree: ' + next, { duration: 1200 });
+        },
+
+        restoreTreeDock() {
+            let stored = 'left';
+            try { stored = localStorage.getItem('treeDock') || 'left'; } catch (err) { /* private mode */ }
+            this.applyTreeDock(['left', 'right', 'bottom', 'hidden'].indexOf(stored) === -1 ? 'left' : stored);
+        },
+
         // File operations
         async refreshFiles() {
             await this.loadFiles(this.currentPath);
@@ -1084,13 +1281,89 @@ function initApp() {
             }
         },
         
+        // Exactly one row, for the actions that only make sense on one.
+        singleSelection() {
+            if (this.selection.size === 1) return Array.from(this.selection.values())[0];
+            if (this.selection.size === 0 && this.selectedFile) return this.selectedFile;
+            return null;
+        },
+
         async deleteSelected() {
-            const path = this.resolvePath(this.selectedFile);
-            if (!path) {
+            const paths = this.selectionPaths();
+            if (!paths.length) {
                 await this.say('Nothing selected', 'Pick a file or folder in the tree first.');
                 return;
             }
-            await this.deletePaths([path]);
+            await this.deletePaths(paths);
+        },
+
+        async archiveSelected() {
+            const paths = this.selectionPaths();
+            if (!paths.length) {
+                await this.say('Nothing selected', 'Pick what you want in the archive first.');
+                return;
+            }
+
+            const ok = await this.ask('Archive ' + paths.length + ' item' + (paths.length === 1 ? '' : 's'),
+                'The panel packs them into a new <span class="mono">.tar.gz</span> in ' +
+                '<span class="mono">' + this.escapeHtml(this.currentPath) + '</span>. ' +
+                'Nothing is removed.',
+                { confirmLabel: 'Archive' });
+            if (!ok) return;
+
+            const busy = window.UX.toast.show('Archiving ' + paths.length + ' item(s)…', { duration: 60000 });
+            try {
+                const result = await window.go.main.App.CompressFiles(paths);
+                busy.dismiss();
+                await this.refreshFiles();
+                window.UX.toast.ok('Created ' + result.name + ' (' + this.formatSize(result.size) + ')');
+            } catch (err) {
+                busy.dismiss();
+                await this.say('Could not archive', String(err));
+            }
+        },
+
+        async extractSelected() {
+            const entry = this.singleSelection();
+            const path = this.resolvePath(entry);
+            if (!path || (entry && entry.isDir)) {
+                await this.say('Pick one archive', 'Select a single archive file to extract.');
+                return;
+            }
+
+            // Extracting in place is the one file operation whose effect cannot
+            // be known in advance — the archive decides what it writes, so a
+            // file it replaces never reaches the recycle bin. Into a new folder
+            // is the default for that reason.
+            const v = await window.Shell.dialog.form('Extract ' + this.escapeHtml(entry.name), [
+                { name: 'where', label: 'Extract into', value: 'new', mono: true,
+                  hint: '<b>new</b> — a fresh folder named after the archive. Nothing existing can be touched.<br>' +
+                        '<b>here</b> — this folder. Files the archive contains <b>replace</b> the ones already ' +
+                        'here, and those replacements are the one thing Vault cannot recover.' }
+            ], { confirmLabel: 'Extract' });
+            if (!v) return;
+
+            const inPlace = String(v.where || '').trim().toLowerCase() === 'here';
+            if (inPlace) {
+                const sure = await this.ask('Extract into this folder?',
+                    'Anything in <span class="mono">' + this.escapeHtml(this.currentPath) + '</span> that the archive ' +
+                    'also contains is overwritten, and those files cannot be restored from Vault.',
+                    { danger: true, confirmLabel: 'Extract here' });
+                if (!sure) return;
+            }
+
+            const busy = window.UX.toast.show('Extracting ' + entry.name + '…', { duration: 120000 });
+            try {
+                const target = await window.go.main.App.DecompressFile(path, !inPlace);
+                busy.dismiss();
+                await this.refreshFiles();
+                window.UX.toast.ok('Extracted into ' + target, {
+                    action: inPlace ? null : { label: 'Open', run: () => this.loadFiles(target) }
+                });
+            } catch (err) {
+                busy.dismiss();
+                await this.say('Could not extract', String(err));
+            }
         },
 
         async deleteFile() {
@@ -1148,25 +1421,31 @@ function initApp() {
                 this.forgetOpenFilesUnder(plan.roots);
                 await this.refreshFiles();
 
-                if (outcome.skipped && outcome.skipped.length) {
-                    await this.say('Deleted, with gaps',
-                        outcome.captured + ' file(s) went to the recycle bin. ' +
-                        outcome.skipped.length + ' could not be copied first and are gone for good:\n' +
-                        outcome.skipped.join('\n'));
-                } else if (outcome.captured > 0) {
-                    // Undo offered where the mistake is noticed: right after it.
-                    const undo = await this.ask('Deleted',
-                        outcome.captured + ' file(s) went to the recycle bin.',
-                        { confirmLabel: 'Undo' });
-                    if (undo && outcome.batch) {
+                // A dialog for the result made you dismiss a box to get back to
+                // work. A toast says the same thing and carries the undo, and
+                // gets out of the way on its own.
+                const undo = outcome.batch ? {
+                    label: 'Undo',
+                    run: async () => {
                         try {
                             const back = await window.go.main.App.RestoreBinBatch(outcome.batch, false);
                             await this.refreshFiles();
-                            await this.say('Undone', (back.restored || []).length + ' file(s) put back.');
+                            window.UX.toast.ok((back.restored || []).length + ' file(s) put back');
                         } catch (err) {
-                            await this.say('Could not undo', String(err));
+                            window.UX.toast.bad('Could not undo: ' + err);
                         }
                     }
+                } : null;
+
+                if (outcome.skipped && outcome.skipped.length) {
+                    window.UX.toast.warn(
+                        outcome.captured + ' in the recycle bin, ' + outcome.skipped.length +
+                        ' could not be copied first and are gone for good',
+                        { action: undo });
+                } else {
+                    window.UX.toast.ok(
+                        outcome.captured + ' file' + (outcome.captured === 1 ? '' : 's') + ' moved to the recycle bin',
+                        { action: undo });
                 }
             } catch (err) {
                 await this.say('Delete failed', String(err));
@@ -1473,7 +1752,54 @@ function initApp() {
                 }
             } catch (err) {
                 console.error('Console connection failed:', err);
-                alert('Failed to connect console: ' + err);
+                window.UX.toast.bad('Console: ' + err);
+            }
+        },
+
+        // Connect if not already. connectConsole() toggles, so auto-connecting
+        // through it would disconnect a console that was already up.
+        async ensureConsole() {
+            if (this.consoleConnected || this.consoleConnecting) return;
+            this.consoleConnecting = true;
+            try {
+                await window.go.main.App.ConnectConsole();
+            } catch (err) {
+                console.warn('Console auto-connect failed:', err);
+            } finally {
+                this.consoleConnecting = false;
+            }
+        },
+
+        /**
+         * Pulls the server's log file in.
+         *
+         * The websocket only replays what wings still has buffered, which is a
+         * few dozen lines — everything older lives in the log file, so that is
+         * where it has to come from.
+         */
+        async loadServerLog() {
+            const busy = window.UX.toast.show('Reading the log file…', { duration: 30000 });
+            try {
+                const tail = await window.go.main.App.GetServerLogTail(1000);
+                busy.dismiss();
+
+                if (!tail.found) {
+                    window.UX.toast.warn('No log file found in the usual places for this egg');
+                    return;
+                }
+
+                const consoleEl = document.getElementById('console');
+                if (consoleEl) consoleEl.innerHTML = '';
+
+                this.appendConsole('=== ' + tail.path +
+                    (tail.truncated ? ' (last ' + tail.lines + ' lines)' : '') + ' ===', 'info');
+                tail.content.split('\n').forEach(line => this.appendConsole(line));
+                this.appendConsole('=== end of file; live output continues below ===', 'info');
+
+                window.UX.toast.ok('Loaded ' + tail.lines + ' lines from ' + tail.path);
+            } catch (err) {
+                busy.dismiss();
+                window.UX.toast.bad('Could not read the log: ' + err);
             }
         },
         
@@ -1483,7 +1809,9 @@ function initApp() {
             
             const command = input.value.trim();
             if (!command) return;
-            
+
+            this.rememberCommand(command);
+            this.commandDraft = '';
             this.appendConsole('> ' + command, 'command');
             input.value = '';
             
