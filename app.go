@@ -463,19 +463,47 @@ func (a *App) SwitchPanel(panelName string) error {
 	return nil
 }
 
-// AddPanel adds a new panel configuration
+// ErrPanelSavedNotConnected prefixes the one failure the UI has to treat
+// differently: the panel is on disk and will be there next launch, but talking
+// to it did not work.
+const ErrPanelSavedNotConnected = "panel saved, but connecting failed"
+
+// AddPanel adds or updates a panel, and connects when that panel is the active
+// one.
+//
+// It used to write the config and return. Nothing connected and nothing listed
+// the servers, so the app showed a configured panel with no connection and an
+// empty server picker until the next restart — while the dialog said the panel
+// had been added successfully.
 func (a *App) AddPanel(name, panelURL, apiKey string) error {
 	if name == "" || panelURL == "" || apiKey == "" {
 		return fmt.Errorf("name, panel URL, and API key are required")
 	}
-	
+
 	panel := config.PanelConfig{
 		Name:     name,
 		PanelURL: panelURL,
 		APIKey:   apiKey,
 	}
-	
-	return a.config.AddOrUpdatePanel(panel)
+
+	if err := a.config.AddOrUpdatePanel(panel); err != nil {
+		return err
+	}
+
+	// Only the active panel drives the connection. Adding a second panel must
+	// not drag the app off the one it is already working on.
+	if a.config.GetActivePanelName() != name {
+		return nil
+	}
+
+	if err := a.Connect(); err != nil {
+		// The credentials stay saved so they can be corrected from the panel
+		// list rather than retyped.
+		return fmt.Errorf("%s: %w", ErrPanelSavedNotConnected, err)
+	}
+
+	a.RefreshAllServerMappings()
+	return nil
 }
 
 // RemovePanel removes a panel configuration

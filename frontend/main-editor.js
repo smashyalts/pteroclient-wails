@@ -1601,29 +1601,62 @@ function initApp() {
             const name = document.getElementById('newPanelName')?.value?.trim();
             const url = document.getElementById('newPanelUrl')?.value?.trim();
             const apiKey = document.getElementById('newPanelApiKey')?.value?.trim();
-            
+
             if (!name || !url || !apiKey) {
-                alert('All fields are required to add a new panel');
+                await this.say('Missing details', 'A display name, the panel URL and an API key are all required.');
                 return;
             }
-            
+
+            // AddPanel connects when the new panel becomes the active one, and
+            // reports that separately from failing to save. A panel that saved
+            // but could not connect is still worth keeping — the URL or the key
+            // can be corrected from the list instead of retyped.
+            let offlineReason = null;
             try {
                 await window.go.main.App.AddPanel(name, url, apiKey);
-                
-                // Clear form
-                document.getElementById('newPanelName').value = '';
-                document.getElementById('newPanelUrl').value = '';
-                document.getElementById('newPanelApiKey').value = '';
-                
-                // Reload panel list
-                await this.loadPanelList();
-                await this.loadPanels();
-                
-                alert('Panel added successfully!');
             } catch (err) {
-                console.error('Failed to add panel:', err);
-                alert('Failed to add panel: ' + err);
+                const message = String(err);
+                if (message.indexOf('panel saved, but connecting failed') === -1) {
+                    console.error('Failed to add panel:', err);
+                    await this.say('Could not add the panel', message);
+                    return;
+                }
+                offlineReason = message;
             }
+
+            // Clear form
+            document.getElementById('newPanelName').value = '';
+            document.getElementById('newPanelUrl').value = '';
+            document.getElementById('newPanelApiKey').value = '';
+
+            // Reload panel list
+            await this.loadPanelList();
+            await this.loadPanels();
+
+            if (offlineReason) {
+                this.updateStatus(false);
+                await this.say('Saved, but not connected',
+                    offlineReason + '\n\nCheck the panel URL and the API key, then use Switch on it in this list to try again.');
+                return;
+            }
+
+            // Connected. Pull the server list in; loadServers selects the first
+            // one when nothing is configured yet, which is what populates the
+            // rest of the app.
+            await this.loadServers();
+            document.dispatchEvent(new CustomEvent('shell:refresh'));
+
+            const dropdown = document.getElementById('serverDropdown');
+            const count = dropdown ? Math.max(0, dropdown.options.length - 1) : 0;
+
+            if (!count) {
+                await this.say('Connected, but no servers',
+                    'Connected to ' + name + ', but this API key can see no servers on it. ' +
+                    'A client key only lists servers your account owns or has been added to.');
+                return;
+            }
+
+            this.closePanelManager();
         },
         
         async removePanel(panelName) {
