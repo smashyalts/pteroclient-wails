@@ -60,7 +60,7 @@
 
 html,
 body {
-    height: 100vh;
+    height: calc(100vh / var(--ui-scale, 1));
     overflow: hidden;
     background-color: var(--bg-primary);
     color: var(--text-primary);
@@ -427,8 +427,10 @@ a:hover {
 /* Workspace + rail ------------------------------------------------------- */
 
 .workspace {
+    /* Sized against the scaled viewport, not the raw one: with zoom applied
+       and 100vh left alone, everything below the fold fell off the bottom. */
     display: flex;
-    height: calc(100vh - var(--titlebar-h));
+    height: calc((100vh / var(--ui-scale, 1)) - var(--titlebar-h));
 }
 
 .rail {
@@ -795,8 +797,8 @@ textarea.mono {
 
 .file-tree {
     width: 288px;
-    min-width: 200px;
-    max-width: 520px;
+    min-width: 120px;
+    max-width: 80vw;
     flex: none;
     resize: horizontal;
     overflow: auto;
@@ -1727,7 +1729,54 @@ button.recording { border-color: var(--accent); color: var(--accent); }
 }
 
 /* ========================================================================
-   Split view
+   Zoom
+   ==================================================================== */
+
+/* Applied to body rather than the root element, and every viewport-sized
+   rule divides by it. Zooming the root while the layout still measured the
+   raw viewport is what pushed the console's command line off screen. */
+body { zoom: var(--ui-scale, 1); }
+
+.palette,
+.modal {
+    width: calc(100vw / var(--ui-scale, 1));
+    height: calc(100vh / var(--ui-scale, 1));
+}
+
+.toast-host { bottom: calc(18px); }
+
+/* ========================================================================
+   Choice dialog
+   ==================================================================== */
+
+.choice-list { display: flex; flex-direction: column; gap: 8px; }
+
+.choice {
+    display: block;
+    width: 100%;
+    height: auto;
+    padding: 11px 13px;
+    text-align: left;
+    border-radius: 8px;
+    white-space: normal;
+}
+
+.choice[data-danger] { border-color: var(--danger); }
+.choice[data-danger]:hover { background: var(--danger-bg, rgba(255, 90, 90, .10)); }
+
+.choice-label { display: block; font-size: 13px; font-weight: 600; color: var(--text-primary); }
+
+.choice-detail {
+    display: block;
+    margin-top: 5px;
+    font-size: 11.5px;
+    line-height: 1.55;
+    font-weight: 400;
+    color: var(--text-faint);
+}
+
+/* ========================================================================
+   Split view: two workspaces
    ==================================================================== */
 
 #splitRoot {
@@ -1737,88 +1786,7 @@ button.recording { border-color: var(--accent); color: var(--accent); }
     min-height: 0;
 }
 
-.split-tree {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    background: var(--bg-secondary);
-    border-right: 1px solid var(--line);
-}
-
-.split-tree-head {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 40px;
-    flex: none;
-    padding: 0 10px;
-    border-bottom: 1px solid var(--line);
-}
-
-.split-tree-head .spacer { flex: 1; }
-
-.split-tree-path {
-    flex: none;
-    padding: 6px 10px;
-    font-size: 11px;
-    color: var(--text-dim);
-    border-bottom: 1px solid var(--line);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.split-tree-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; }
-
-.split-pane {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-    border-left: 1px solid var(--line-strong);
-}
-
-.split-head {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-    height: 40px;
-    flex: none;
-    padding: 0 12px;
-    background: var(--bg-secondary);
-    border-bottom: 1px solid var(--line);
-}
-
-.split-focus {
-    width: 6px;
-    height: 6px;
-    flex: none;
-    border-radius: 50%;
-    background: var(--line-strong);
-}
-
-.split-pane.focused .split-focus {
-    background: var(--accent);
-    box-shadow: 0 0 0 3px rgba(120, 160, 255, .18);
-}
-
-.split-pane.focused .split-head { background: var(--bg-hover); }
-
-.split-server { width: auto; min-width: 150px; max-width: 220px; height: 26px; font-size: 11.5px; }
-
-.split-file {
-    font-size: 11.5px;
-    color: var(--text-dim);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 220px;
-}
-
-.split-dirty { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
-.split-body { position: relative; flex: 1; min-height: 0; display: flex; }
-.split-body .editor-textarea { flex: 1; }
-
-/* Drag handles between the three columns. */
+/* Divider between the two workspaces. */
 .split-grip {
     flex: none;
     width: 5px;
@@ -1830,3 +1798,172 @@ button.recording { border-color: var(--accent); color: var(--accent); }
 .split-grip:hover { background: var(--accent); }
 body.resizing { cursor: col-resize; user-select: none; }
 body.resizing .split-grip { background: var(--accent); }
+
+.ws {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    border-left: 1px solid var(--line-strong);
+}
+
+.ws:first-child { border-left: 0; }
+
+.ws-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    height: 38px;
+    flex: none;
+    padding: 0 10px;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--line);
+}
+
+.ws-head .spacer { flex: 1; }
+
+.ws-focus {
+    width: 6px;
+    height: 6px;
+    flex: none;
+    border-radius: 50%;
+    background: var(--line-strong);
+}
+
+.ws.focused .ws-focus { background: var(--accent); box-shadow: 0 0 0 3px rgba(120, 160, 255, .18); }
+.ws.focused .ws-head { background: var(--bg-hover); }
+
+.ws-server { width: auto; min-width: 140px; max-width: 260px; height: 26px; font-size: 11.5px; }
+
+.ws-body {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+}
+
+.ws.stacked .ws-body { flex-direction: column-reverse; }
+
+.ws-explorer {
+    display: flex;
+    flex-direction: column;
+    flex: 0 0 32%;
+    min-width: 0;
+    min-height: 0;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--line);
+}
+
+.ws.stacked .ws-explorer { border-right: 0; border-top: 1px solid var(--line); }
+
+.ws-explorer.drop-target {
+    outline: 2px dashed var(--accent);
+    outline-offset: -4px;
+    background: rgba(120, 160, 255, .06);
+}
+
+.ws-path {
+    flex: none;
+    padding: 7px 10px;
+    font-size: 11px;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--line);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.ws-list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; }
+.ws-list .file-item.dragging { opacity: .45; }
+
+.ws-editor {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+}
+
+.ws-tabs {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    height: 32px;
+    flex: none;
+    padding: 0 6px;
+    overflow-x: auto;
+    background: var(--bg-primary);
+    border-bottom: 1px solid var(--line);
+}
+
+.ws-tabs-empty { padding: 0 6px; font-size: 11px; color: var(--text-faint); }
+
+.ws-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    max-width: 190px;
+    height: 24px;
+    padding: 0 8px;
+    border-radius: 5px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.ws-tab:hover { background: var(--bg-hover); }
+.ws-tab.active { background: var(--bg-hover); color: var(--text-primary); }
+
+.ws-tab-name { overflow: hidden; text-overflow: ellipsis; }
+
+.ws-tab.modified .ws-tab-name::after {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    margin-left: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    vertical-align: middle;
+}
+
+.ws-tab-close { flex: none; opacity: .5; font-size: 14px; line-height: 1; }
+.ws-tab-close:hover { opacity: 1; }
+
+.ws-editor .editor-textarea { flex: 1; min-height: 0; }
+
+.ws-foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: 34px;
+    flex: none;
+    padding: 0 10px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--line);
+}
+
+.ws-foot .spacer { flex: 1; }
+
+.ws-file {
+    font-size: 11px;
+    color: var(--text-faint);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Divider inside a workspace, between explorer and editor. */
+.ws-grip {
+    flex: none;
+    width: 5px;
+    cursor: col-resize;
+    background: transparent;
+    transition: background .12s ease;
+}
+
+.ws.stacked .ws-grip { width: auto; height: 5px; cursor: row-resize; }
+.ws-grip:hover { background: var(--accent); }
+body.resizing .ws-grip { background: var(--accent); }

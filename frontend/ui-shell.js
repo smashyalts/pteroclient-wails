@@ -95,6 +95,40 @@
             }).then((v) => v !== null && v !== undefined && v !== false);
         },
 
+        /**
+         * Multiple-choice. `choices` is [{key,label,detail,danger,primary}].
+         * Resolves the chosen key, or null when cancelled.
+         */
+        choose(title, message, choices) {
+            const modal = $('appDialog');
+            const body = (message ? '<p style="font-size:12.5px;line-height:1.6;color:var(--text-secondary)">' +
+                message + '</p>' : '') +
+                '<div class="choice-list">' + choices.map((c) => (
+                    '<button class="choice" type="button" data-choice="' + escapeHtml(c.key) + '"' +
+                    (c.danger ? ' data-danger="1"' : '') + '>' +
+                    '<span class="choice-label">' + escapeHtml(c.label) + '</span>' +
+                    (c.detail ? '<span class="choice-detail">' + c.detail + '</span>' : '') +
+                    '</button>'
+                )).join('') + '</div>';
+
+            $('appDialogTitle').textContent = title;
+            $('appDialogBody').innerHTML = body;
+            modal.classList.add('show');
+            modal.querySelector('.modal-footer').style.display = 'none';
+
+            return new Promise((resolve) => {
+                if (Dialog._resolve) {
+                    const stale = Dialog._resolve;
+                    Dialog._resolve = null;
+                    stale(null);
+                }
+                Dialog._resolve = (value) => {
+                    modal.querySelector('.modal-footer').style.display = '';
+                    resolve(value);
+                };
+            });
+        },
+
         /** Form dialog. `fields` is [{name,label,placeholder,type,value}].
          *  `opts.intro` is HTML placed above the fields — used by the delete
          *  confirmation to show what is about to go before asking to type it.
@@ -137,6 +171,10 @@
         });
         modal.querySelector('[data-dialog-confirm]').addEventListener('click', () => Dialog.close(true));
         modal.addEventListener('click', (e) => {
+            const choice = e.target.closest('[data-choice]');
+            if (choice) Dialog.close(choice.getAttribute('data-choice'));
+        });
+        modal.addEventListener('click', (e) => {
             if (e.target === modal) Dialog.close(null);
         });
         modal.addEventListener('keydown', (e) => {
@@ -166,6 +204,7 @@
             filesNewFolderBtn: 'folderPlus',
             filesNewFileBtn: 'filePlus',
             filesDeleteBtn: 'trash',
+            filesDockBtn: 'layout',
             splitViewBtn: 'split',
             refreshServersBtn: 'refresh',
             managePanelsBtn: 'sliders'

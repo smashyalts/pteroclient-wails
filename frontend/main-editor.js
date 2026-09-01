@@ -883,6 +883,8 @@ function initApp() {
                 // Update file type
                 this.updateFileType(file.name);
 
+                if (window.Session) window.Session.save();
+
             } catch (err) {
                 await this.say('Failed to open file', String(err));
             }
@@ -1071,6 +1073,7 @@ function initApp() {
         closeFileTab(path) {
             // Remove from open files
             this.openFiles.delete(path);
+            if (window.Session) window.Session.save();
             
             // Remove tab
             const tab = document.querySelector(`.editor-tab[data-path="${path}"]`);
@@ -1331,26 +1334,21 @@ function initApp() {
                 return;
             }
 
-            // Extracting in place is the one file operation whose effect cannot
-            // be known in advance — the archive decides what it writes, so a
-            // file it replaces never reaches the recycle bin. Into a new folder
-            // is the default for that reason.
-            const v = await window.Shell.dialog.form('Extract ' + this.escapeHtml(entry.name), [
-                { name: 'where', label: 'Extract into', value: 'new', mono: true,
-                  hint: '<b>new</b> — a fresh folder named after the archive. Nothing existing can be touched.<br>' +
-                        '<b>here</b> — this folder. Files the archive contains <b>replace</b> the ones already ' +
-                        'here, and those replacements are the one thing Vault cannot recover.' }
-            ], { confirmLabel: 'Extract' });
-            if (!v) return;
+            const where = await window.Shell.dialog.choose(
+                'Extract ' + this.escapeHtml(entry.name), '',
+                [
+                    { key: 'new', label: 'Extract to folder',
+                      detail: 'A new folder named <span class="mono">' +
+                              this.escapeHtml(entry.name.replace(/\.(tar\.gz|tgz|tar|zip|gz|7z|rar)$/i, '')) +
+                              '</span>. Nothing already here is touched.' },
+                    { key: 'here', label: 'Replace into current folder', danger: true,
+                      detail: 'Files the archive contains replace the ones in <span class="mono">' +
+                              this.escapeHtml(this.currentPath) + '</span>. Those replacements are the one thing ' +
+                              'Vault cannot recover.' }
+                ]);
+            if (!where) return;
 
-            const inPlace = String(v.where || '').trim().toLowerCase() === 'here';
-            if (inPlace) {
-                const sure = await this.ask('Extract into this folder?',
-                    'Anything in <span class="mono">' + this.escapeHtml(this.currentPath) + '</span> that the archive ' +
-                    'also contains is overwritten, and those files cannot be restored from Vault.',
-                    { danger: true, confirmLabel: 'Extract here' });
-                if (!sure) return;
-            }
+            const inPlace = where === 'here';
 
             const busy = window.UX.toast.show('Extracting ' + entry.name + '…', { duration: 120000 });
             try {

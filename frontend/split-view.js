@@ -1,16 +1,19 @@
 /**
- * Split editor: one file tree, two panes, every divider draggable.
+ * Split view: two independent workspaces side by side.
  *
- * The previous version gave each pane its own browser that slid over the
- * editor, so opening a file hid the thing you were browsing and the only way
- * back was the Browse button. Here the tree is a column of its own and stays
- * put; it follows whichever pane has focus, and a click sends the file into
- * that pane.
+ * Each one is a small copy of the whole file tab — its own server, its own
+ * explorer, its own set of open tabs, its own editor — so working on two
+ * servers at once means two windows rather than two text boxes sharing one
+ * tree. Servers may be on different panels; the *FromServer bindings resolve
+ * which panel each belongs to without disturbing the server the rest of the app
+ * is pointed at.
  *
- * Panes can sit on different servers, including servers on different panels.
- * That is why the tree reads through ListFilesFromServer and the panes save
- * through SafeSaveFileContentToServer: those resolve the panel behind the
- * scenes without disturbing the server the rest of the app is pointed at.
+ * Files drag from one workspace's explorer into the other's, which copies them
+ * across — including across panels. The bytes are moved by the Go side, never
+ * through the frontend, so binaries survive the trip.
+ *
+ * Layout: the divider between the two workspaces drags, and inside each one the
+ * explorer can sit beside the editor or under it, with its own divider.
  */
 (function () {
     'use strict';
@@ -19,85 +22,112 @@
     const go = () => (window.go && window.go.main && window.go.main.App) || null;
     const esc = (v) => window.Shell.fmt.escapeHtml(v);
     const icon = (n, c) => window.Icons.svg(n, c);
+    const SIDES = ['left', 'right'];
 
     let active = false;
     let servers = [];
     let focused = 'left';
-    const panes = {};
+    const spaces = {};
 
-    // Column widths as flex-grow values: [tree, left pane, right pane].
-    let layout = [22, 39, 39];
+    // Outer split as flex-grow for [left, right].
+    let outer = [50, 50];
 
-    function paneState(side) {
-        if (!panes[side]) {
-            panes[side] = {
-                side: side, serverID: '', serverName: '', panel: '',
-                path: '/', file: '', original: '', dirty: false
+    function space(side) {
+        if (!spaces[side]) {
+            spaces[side] = {
+                side: side,
+                serverID: '', serverName: '', panel: '',
+                path: '/',
+                tabs: new Map(),      // path -> {name, content, original, dirty}
+                activeTab: null,
+                layout: 'side',       // 'side' | 'stacked'
+                explorerSize: 32      // percent of the workspace
             };
         }
-        return panes[side];
+        return spaces[side];
     }
 
-    /* ------------------------------------------------------------- layout */
+    /* -------------------------------------------------------------- layout */
 
     function loadLayout() {
         try {
-            const stored = JSON.parse(localStorage.getItem('splitLayout') || 'null');
-            if (Array.isArray(stored) && stored.length === 3 && stored.every(n => typeof n === 'number' && n > 4)) {
-                layout = stored;
-            }
+            const stored = JSON.parse(localStorage.getItem('splitLayout2') || 'null');
+            if (!stored) return;
+            if (Array.isArray(stored.outer) && stored.outer.length === 2) outer = stored.outer;
+            SIDES.forEach((side) => {
+                const saved = stored[side];
+                if (!saved) return;
+                const st = space(side);
+                if (saved.layout === 'side' || saved.layout === 'stacked') st.layout = saved.layout;
+                if (typeof saved.explorerSize === 'number') st.explorerSize = saved.explorerSize;
+            });
         } catch (err) { /* private mode */ }
     }
 
     function saveLayout() {
-        try { localStorage.setItem('splitLayout', JSON.stringify(layout)); } catch (err) { /* private mode */ }
+        try {
+            localStorage.setItem('splitLayout2', JSON.stringify({
+                outer: outer,
+                left: { layout: space('left').layout, explorerSize: space('left').explorerSize },
+                right: { layout: space('right').layout, explorerSize: space('right').explorerSize }
+            }));
+        } catch (err) { /* private mode */ }
     }
 
     function applyLayout() {
         const root = $('splitRoot');
         if (!root) return;
-        const cols = root.querySelectorAll('[data-col]');
-        cols.forEach((col, i) => { col.style.flexGrow = layout[i]; });
+
+        SIDES.forEach((side, i) => {
+            const el = root.querySelector('[data-space="' + side + '"]');
+            if (!el) return;
+            el.style.flexGrow = outer[i];
+
+            const st = space(side);
+            el.classList.toggle('stacked', st.layout === 'stacked');
+            const explorer = el.querySelector('.ws-explorer');
+            if (explorer) explorer.style.flexBasis = st.explorerSize + '%';
+        });
     }
 
-    /* ------------------------------------------------------------- markup */
+    /* -------------------------------------------------------------- markup */
 
-    function paneMarkup(side) {
+    function workspaceMarkup(side) {
         return '' +
-            '<section class="split-pane" data-col="' + (side === 'left' ? 1 : 2) + '" data-side="' + side + '">' +
-            '  <header class="split-head">' +
-            '    <span class="split-focus" title="Files open into the focused pane"></span>' +
-            '    <select data-role="server" class="split-server"><option value="">Choose a server…</option></select>' +
-            '    <span class="split-file mono" data-role="filename">no file open</span>' +
-            '    <span class="split-dirty" data-role="dirty" hidden></span>' +
+            '<section class="ws" data-space="' + side + '" data-side="' + side + '">' +
+            '  <header class="ws-head">' +
+            '    <span class="ws-focus" title="The focused workspace takes the keyboard"></span>' +
+            '    <select data-role="server" class="ws-server"><option value="">Choose a server…</option></select>' +
             '    <span class="spacer"></span>' +
-            '    <button class="sm primary" data-role="save" type="button" disabled>Save</button>' +
+            '    <button class="sm icon-only" data-role="wslayout" title="Explorer beside / below the editor"></button>' +
             '  </header>' +
-            '  <div class="split-body">' +
-            '    <textarea class="editor-textarea mono" data-role="editor" spellcheck="false" ' +
-            '      placeholder="Pick a server, then choose a file from the tree."></textarea>' +
+            '  <div class="ws-body">' +
+            '    <div class="ws-explorer">' +
+            '      <div class="ws-path mono" data-role="path">/</div>' +
+            '      <div class="ws-list" data-role="list"></div>' +
+            '    </div>' +
+            '    <div class="ws-grip" data-innergrip="' + side + '"></div>' +
+            '    <div class="ws-editor">' +
+            '      <div class="ws-tabs" data-role="tabs"></div>' +
+            '      <textarea class="editor-textarea mono" data-role="editor" spellcheck="false"' +
+            '        placeholder="Pick a server, then open a file from the explorer."></textarea>' +
+            '      <div class="ws-foot">' +
+            '        <span class="ws-file mono" data-role="filename">no file open</span>' +
+            '        <span class="spacer"></span>' +
+            '        <button class="sm primary" data-role="save" type="button" disabled>Save</button>' +
+            '      </div>' +
+            '    </div>' +
             '  </div>' +
             '</section>';
     }
 
     function rootMarkup() {
-        return '' +
-            '<div class="split-tree" data-col="0">' +
-            '  <div class="split-tree-head">' +
-            '    <span class="eyebrow" data-role="treeserver">no server</span>' +
-            '    <span class="spacer"></span>' +
-            '    <button class="sm icon-only" data-role="treerefresh" type="button" title="Refresh"></button>' +
-            '  </div>' +
-            '  <div class="split-tree-path mono" data-role="treepath">/</div>' +
-            '  <div class="split-tree-list" data-role="treelist"></div>' +
-            '</div>' +
-            '<div class="split-grip" data-grip="0"></div>' +
-            paneMarkup('left') +
-            '<div class="split-grip" data-grip="1"></div>' +
-            paneMarkup('right');
+        return workspaceMarkup('left') +
+            '<div class="split-grip" data-outergrip="1"></div>' +
+            workspaceMarkup('right');
     }
 
-    /* ------------------------------------------------------------ servers */
+    /* ------------------------------------------------------------- servers */
 
     async function loadServers() {
         const api = go();
@@ -111,11 +141,8 @@
     }
 
     function fillServerSelects() {
-        // Grouped by panel, so it is obvious when a pane is on another one.
         const byPanel = {};
-        servers.forEach((srv) => {
-            (byPanel[srv.panel] = byPanel[srv.panel] || []).push(srv);
-        });
+        servers.forEach((srv) => { (byPanel[srv.panel] = byPanel[srv.panel] || []).push(srv); });
 
         document.querySelectorAll('#splitRoot [data-role="server"]').forEach((sel) => {
             const current = sel.value;
@@ -133,49 +160,38 @@
         });
     }
 
-    /* --------------------------------------------------------------- tree */
+    /* ------------------------------------------------------------ explorer */
 
-    function setFocus(side) {
-        focused = side;
-        document.querySelectorAll('#splitRoot .split-pane').forEach((pane) => {
-            pane.classList.toggle('focused', pane.getAttribute('data-side') === side);
-        });
-        renderTree();
+    function el(side, selector) {
+        const root = document.querySelector('#splitRoot [data-space="' + side + '"]');
+        return root ? root.querySelector(selector) : null;
     }
 
-    async function renderTree(path) {
-        const root = $('splitRoot');
-        if (!root) return;
+    async function browse(side, path) {
+        const st = space(side);
+        const list = el(side, '[data-role="list"]');
+        const crumb = el(side, '[data-role="path"]');
+        if (!list) return;
 
-        const list = root.querySelector('[data-role="treelist"]');
-        const label = root.querySelector('[data-role="treeserver"]');
-        const crumb = root.querySelector('[data-role="treepath"]');
-        const state = paneState(focused);
-
-        label.textContent = state.serverName
-            ? (state.panel ? state.panel + ' · ' + state.serverName : state.serverName)
-            : 'no server';
-
-        if (!state.serverID) {
+        if (!st.serverID) {
             crumb.textContent = '/';
-            list.innerHTML = '<div class="empty-state"><div class="empty-state-title">Pick a server</div>' +
-                '<div class="empty-state-hint">Each pane chooses its own, and the tree follows the focused one.</div></div>';
+            list.innerHTML = '<div class="preview-empty">Pick a server</div>';
             return;
         }
 
-        const target = path === undefined ? (state.path || '/') : path;
-        crumb.textContent = target;
+        const target = path === undefined ? (st.path || '/') : path;
+        crumb.textContent = (st.panel ? st.panel + ' · ' : '') + target;
         list.innerHTML = '<div class="loading">' + icon('refresh', 'spin') + '</div>';
 
         let files;
         try {
-            files = await go().ListFilesFromServer(state.serverID, target);
+            files = await go().ListFilesFromServer(st.serverID, target);
         } catch (err) {
             list.innerHTML = '<div class="error">' + esc(String(err)) + '</div>';
             return;
         }
 
-        state.path = target;
+        st.path = target;
 
         (files || []).sort((a, b) => {
             if (a.isDir !== b.isDir) return b.isDir ? 1 : -1;
@@ -188,10 +204,10 @@
                 '<span class="file-icon kind-dir">' + icon('folder') + '</span>' +
                 '<span class="file-name">..</span></div>';
         }
-
         (files || []).forEach((f) => {
             const isDir = !!f.isDir;
-            html += '<div class="file-item" data-name="' + esc(f.name) + '" data-dir="' + (isDir ? '1' : '') + '">' +
+            html += '<div class="file-item" draggable="' + (isDir ? 'false' : 'true') + '" ' +
+                'data-name="' + esc(f.name) + '" data-dir="' + (isDir ? '1' : '') + '">' +
                 '<span class="file-icon kind-' + window.Icons.kindFor(f.name, isDir) + '">' +
                 window.Icons.forFile(f.name, isDir) + '</span>' +
                 '<span class="file-name">' + esc(f.name) + '</span>' +
@@ -201,79 +217,130 @@
         list.innerHTML = html || '<div class="preview-empty">Empty folder</div>';
     }
 
-    /* --------------------------------------------------------------- files */
+    /* ---------------------------------------------------------------- tabs */
+
+    function renderTabs(side) {
+        const st = space(side);
+        const bar = el(side, '[data-role="tabs"]');
+        if (!bar) return;
+
+        if (!st.tabs.size) {
+            bar.innerHTML = '<span class="ws-tabs-empty">no files open</span>';
+            return;
+        }
+
+        let html = '';
+        st.tabs.forEach((tab, path) => {
+            html += '<div class="ws-tab' + (path === st.activeTab ? ' active' : '') +
+                (tab.dirty ? ' modified' : '') + '" data-tab="' + esc(path) + '" title="' + esc(path) + '">' +
+                '<span class="ws-tab-name">' + esc(tab.name) + '</span>' +
+                '<span class="ws-tab-close" data-close="' + esc(path) + '">&times;</span></div>';
+        });
+        bar.innerHTML = html;
+    }
+
+    function showTab(side, path) {
+        const st = space(side);
+        const tab = st.tabs.get(path);
+        if (!tab) return;
+
+        st.activeTab = path;
+        const editor = el(side, '[data-role="editor"]');
+        editor.value = tab.content;
+        el(side, '[data-role="filename"]').textContent = path;
+        renderTabs(side);
+        refreshSave(side);
+    }
+
+    async function closeTab(side, path) {
+        const st = space(side);
+        const tab = st.tabs.get(path);
+        if (!tab) return;
+
+        if (tab.dirty) {
+            const ok = await window.Shell.dialog.confirm('Unsaved changes',
+                'Close <span class="mono">' + esc(path) + '</span> and lose its changes?',
+                { danger: true, confirmLabel: 'Close anyway' });
+            if (!ok) return;
+        }
+
+        st.tabs.delete(path);
+        if (st.activeTab === path) {
+            const next = st.tabs.keys().next();
+            st.activeTab = next.done ? null : next.value;
+        }
+
+        if (st.activeTab) {
+            showTab(side, st.activeTab);
+        } else {
+            el(side, '[data-role="editor"]').value = '';
+            el(side, '[data-role="filename"]').textContent = 'no file open';
+            renderTabs(side);
+            refreshSave(side);
+        }
+        window.Session && window.Session.save();
+    }
 
     async function openFile(side, name) {
-        const state = paneState(side);
-        const root = document.querySelector('#splitRoot [data-side="' + side + '"]');
-        const editor = root.querySelector('[data-role="editor"]');
+        const st = space(side);
+        const full = st.path === '/' ? '/' + name : st.path + '/' + name;
 
-        if (state.dirty && !(await confirmDiscard(side))) return;
+        if (st.tabs.has(full)) return showTab(side, full);
 
-        const full = state.path === '/' ? '/' + name : state.path + '/' + name;
-        editor.value = 'Loading…';
+        const editor = el(side, '[data-role="editor"]');
         editor.disabled = true;
 
         try {
             // Same guard as the main editor: a binary or oversized file loaded
             // into a textarea comes back mangled on save.
-            const read = await go().ReadFileForEdit(state.serverID, full);
+            const read = await go().ReadFileForEdit(st.serverID, full);
             if (read.binary || read.too_big) {
-                editor.value = '';
-                state.file = '';
-                state.original = '';
                 window.UX.toast.warn(read.binary
                     ? name + ' is binary; editing it here would corrupt it'
                     : name + ' is over the 8 MB editor limit');
-            } else {
-                state.file = full;
-                state.original = read.content;
-                editor.value = read.content;
+                return;
             }
+            st.tabs.set(full, { name: name, content: read.content, original: read.content, dirty: false });
+            showTab(side, full);
+            window.Session && window.Session.save();
         } catch (err) {
-            editor.value = '';
-            state.file = '';
-            state.original = '';
             window.UX.toast.bad(String(err));
         } finally {
             editor.disabled = false;
         }
-
-        root.querySelector('[data-role="filename"]').textContent = state.file || 'no file open';
-        markDirty(side, false);
     }
 
-    /** Shared prompt for the three ways a pane can lose unsaved edits. */
-    function confirmDiscard(side) {
-        const state = paneState(side);
-        return window.Shell.dialog.confirm('Unsaved changes',
-            'The ' + side + ' pane has unsaved changes to <span class="mono">' + esc(state.file) + '</span>. ' +
-            'Continuing discards them.',
-            { danger: true, confirmLabel: 'Discard them' });
+    function refreshSave(side) {
+        const st = space(side);
+        const btn = el(side, '[data-role="save"]');
+        if (!btn) return;
+        const tab = st.activeTab ? st.tabs.get(st.activeTab) : null;
+        btn.disabled = !tab || !tab.dirty;
     }
 
     /**
-     * Writes one pane back to its server.
+     * Writes the focused tab back to its server.
      *
      * Goes through SafeSaveFileContentToServer, so the state being replaced is
      * filed in the local history first and a file that changed on the panel
-     * since this pane opened it is refused rather than clobbered. That matters
-     * more here than in the main editor: both panes can hold the same file on
-     * the same server, and saving one would otherwise wipe the other's work.
+     * since this tab opened it is refused rather than clobbered. Both
+     * workspaces can hold the same file on the same server, and saving one
+     * would otherwise wipe the other's work.
      */
     async function save(side, force) {
-        const state = paneState(side);
-        if (!state.serverID || !state.file) return;
+        const st = space(side);
+        if (!st.serverID || !st.activeTab) return;
 
-        const root = document.querySelector('#splitRoot [data-side="' + side + '"]');
-        const editor = root.querySelector('[data-role="editor"]');
-        const btn = root.querySelector('[data-role="save"]');
+        const tab = st.tabs.get(st.activeTab);
+        if (!tab) return;
 
+        const btn = el(side, '[data-role="save"]');
         btn.disabled = true;
         btn.textContent = 'Saving…';
+
         try {
             const res = await go().SafeSaveFileContentToServer(
-                state.serverID, state.file, editor.value, state.original, !!force);
+                st.serverID, st.activeTab, tab.content, tab.original, !!force);
 
             if (res && res.conflict) {
                 btn.textContent = 'Save';
@@ -282,22 +349,24 @@
                 let diff = '';
                 if (res.remote_content && window.Vault && window.Vault.diffHtml) {
                     diff = '<div style="margin-top:12px">' +
-                        window.Vault.diffHtml(res.remote_content, editor.value) + '</div>';
+                        window.Vault.diffHtml(res.remote_content, tab.content) + '</div>';
                 }
 
                 const ok = await window.Shell.dialog.confirm('The panel copy changed',
-                    '<span class="mono">' + esc(state.file) + '</span> ' + esc(res.reason) + '.' +
-                    '<br><br>Saving now replaces it with what is in this pane. The panel copy is filed in the ' +
-                    'local history first, so it can be restored from Vault.' + diff,
+                    '<span class="mono">' + esc(st.activeTab) + '</span> ' + esc(res.reason) + '.' +
+                    '<br><br>Saving now replaces it with what is in this workspace. The panel copy is filed in ' +
+                    'the local history first, so it can be restored from Vault.' + diff,
                     { danger: true, confirmLabel: 'Overwrite anyway' });
                 if (!ok) return;
                 return save(side, true);
             }
 
-            state.original = editor.value;
-            markDirty(side, false);
+            tab.original = tab.content;
+            tab.dirty = false;
+            renderTabs(side);
             btn.textContent = 'Saved';
-            setTimeout(() => { btn.textContent = 'Save'; }, 1200);
+            setTimeout(() => { btn.textContent = 'Save'; refreshSave(side); }, 1100);
+            window.Session && window.Session.save();
         } catch (err) {
             btn.textContent = 'Save';
             btn.disabled = false;
@@ -305,55 +374,192 @@
         }
     }
 
-    function markDirty(side, dirty) {
-        const state = paneState(side);
-        state.dirty = dirty;
-        const root = document.querySelector('#splitRoot [data-side="' + side + '"]');
-        if (!root) return;
-        root.querySelector('[data-role="dirty"]').hidden = !dirty;
-        root.querySelector('[data-role="save"]').disabled = !dirty || !state.file;
+    function saveAll() {
+        SIDES.forEach((side) => {
+            const st = space(side);
+            if (st.activeTab && st.tabs.get(st.activeTab) && st.tabs.get(st.activeTab).dirty) save(side);
+        });
+    }
+
+    /* --------------------------------------------------------------- focus */
+
+    function setFocus(side) {
+        focused = side;
+        document.querySelectorAll('#splitRoot .ws').forEach((ws) => {
+            ws.classList.toggle('focused', ws.getAttribute('data-side') === side);
+        });
+    }
+
+    /* ------------------------------------------------------- server change */
+
+    async function setServer(side, id, name, panel) {
+        const st = space(side);
+
+        const dirty = Array.from(st.tabs.values()).some(t => t.dirty);
+        if (dirty) {
+            const ok = await window.Shell.dialog.confirm('Unsaved changes',
+                'The ' + side + ' workspace has unsaved files. Switching servers closes them.',
+                { danger: true, confirmLabel: 'Discard and switch' });
+            if (!ok) return false;
+        }
+
+        st.serverID = id;
+        st.serverName = name || '';
+        st.panel = panel || '';
+        st.path = '/';
+        st.tabs.clear();
+        st.activeTab = null;
+
+        el(side, '[data-role="editor"]').value = '';
+        el(side, '[data-role="filename"]').textContent = 'no file open';
+        renderTabs(side);
+        refreshSave(side);
+        await browse(side, '/');
+        window.Session && window.Session.save();
+        return true;
     }
 
     /* ------------------------------------------------------------ resizing */
 
-    function startDrag(gripIndex, startEvent) {
+    function dragOuter(startEvent) {
         const root = $('splitRoot');
-        if (!root) return;
-
-        const cols = Array.from(root.querySelectorAll('[data-col]'));
-        const a = gripIndex;          // column before the grip
-        const b = gripIndex + 1;      // column after it
-
         const rect = root.getBoundingClientRect();
-        const total = layout[a] + layout[b];
         const startX = startEvent.clientX;
-        const startA = layout[a];
-        const pxPerUnit = rect.width / layout.reduce((sum, n) => sum + n, 0);
-
-        // A minimum keeps a column from collapsing to a sliver that cannot be
-        // grabbed again.
-        const MIN = 8;
+        const startLeft = outer[0];
+        const total = outer[0] + outer[1];
+        const perPx = total / rect.width;
 
         function onMove(e) {
-            const delta = (e.clientX - startX) / pxPerUnit;
-            let nextA = Math.max(MIN, Math.min(total - MIN, startA + delta));
-            layout[a] = nextA;
-            layout[b] = total - nextA;
-            cols[a].style.flexGrow = layout[a];
-            cols[b].style.flexGrow = layout[b];
+            const next = Math.max(10, Math.min(total - 10, startLeft + (e.clientX - startX) * perPx));
+            outer = [next, total - next];
+            applyLayout();
         }
-
         function onUp() {
             document.removeEventListener('mousemove', onMove);
             document.removeEventListener('mouseup', onUp);
             document.body.classList.remove('resizing');
             saveLayout();
         }
-
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
         document.body.classList.add('resizing');
         startEvent.preventDefault();
+    }
+
+    function dragInner(side, startEvent) {
+        const st = space(side);
+        const body = el(side, '.ws-body');
+        const rect = body.getBoundingClientRect();
+        const vertical = st.layout === 'stacked';
+        const start = vertical ? startEvent.clientY : startEvent.clientX;
+        const span = vertical ? rect.height : rect.width;
+        const startSize = st.explorerSize;
+
+        function onMove(e) {
+            const now = vertical ? e.clientY : e.clientX;
+            const delta = ((now - start) / span) * 100;
+            // 10%..85% keeps both halves grabbable; the old floor was so high
+            // the explorer barely moved.
+            st.explorerSize = Math.max(10, Math.min(85, startSize + delta));
+            applyLayout();
+        }
+        function onUp() {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.classList.remove('resizing');
+            saveLayout();
+        }
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.body.classList.add('resizing');
+        startEvent.preventDefault();
+    }
+
+    /* -------------------------------------------------------- drag betweeen */
+
+    let dragging = null;
+
+    function wireDragAndDrop(root) {
+        root.addEventListener('dragstart', (e) => {
+            const row = e.target.closest('.ws-list .file-item');
+            if (!row || row.dataset.dir || row.dataset.updir) return;
+
+            const side = row.closest('.ws').getAttribute('data-side');
+            const st = space(side);
+            dragging = {
+                side: side,
+                serverID: st.serverID,
+                path: st.path === '/' ? '/' + row.dataset.name : st.path + '/' + row.dataset.name,
+                name: row.dataset.name
+            };
+            e.dataTransfer.effectAllowed = 'copy';
+            e.dataTransfer.setData('text/plain', dragging.path);
+            row.classList.add('dragging');
+        });
+
+        root.addEventListener('dragend', (e) => {
+            const row = e.target.closest('.file-item');
+            if (row) row.classList.remove('dragging');
+            root.querySelectorAll('.ws-explorer.drop-target').forEach(x => x.classList.remove('drop-target'));
+            dragging = null;
+        });
+
+        root.addEventListener('dragover', (e) => {
+            if (!dragging) return;
+            const explorer = e.target.closest('.ws-explorer');
+            if (!explorer) return;
+            const side = explorer.closest('.ws').getAttribute('data-side');
+            // Dropping a file back where it came from is a no-op, so it is not
+            // offered as one.
+            if (side === dragging.side) return;
+            if (!space(side).serverID) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+            explorer.classList.add('drop-target');
+        });
+
+        root.addEventListener('dragleave', (e) => {
+            const explorer = e.target.closest('.ws-explorer');
+            if (explorer && !explorer.contains(e.relatedTarget)) explorer.classList.remove('drop-target');
+        });
+
+        root.addEventListener('drop', async (e) => {
+            const explorer = e.target.closest('.ws-explorer');
+            if (!explorer || !dragging) return;
+            const side = explorer.closest('.ws').getAttribute('data-side');
+            if (side === dragging.side) return;
+
+            e.preventDefault();
+            explorer.classList.remove('drop-target');
+
+            const target = space(side);
+            const from = dragging;
+            dragging = null;
+
+            const busy = window.UX.toast.show('Copying ' + from.name + '…', { duration: 60000 });
+            try {
+                let res = await go().CopyFileBetweenServers(
+                    from.serverID, from.path, target.serverID, target.path, false);
+
+                if (res.conflict) {
+                    busy.dismiss();
+                    const ok = await window.Shell.dialog.confirm('Replace ' + esc(from.name) + '?',
+                        esc(res.reason) + '.<br><br>The file being replaced goes to the recycle bin first.',
+                        { danger: true, confirmLabel: 'Replace' });
+                    if (!ok) return;
+                    res = await go().CopyFileBetweenServers(
+                        from.serverID, from.path, target.serverID, target.path, true);
+                } else {
+                    busy.dismiss();
+                }
+
+                await browse(side);
+                window.UX.toast.ok((res.replaced ? 'Replaced ' : 'Copied ') + from.name + ' → ' + res.path);
+            } catch (err) {
+                busy.dismiss();
+                window.UX.toast.bad('Copy failed: ' + err);
+            }
+        });
     }
 
     /* -------------------------------------------------------------- toggle */
@@ -375,27 +581,33 @@
         root.innerHTML = rootMarkup();
         manager.appendChild(root);
 
+        root.querySelectorAll('[data-role="wslayout"]').forEach((btn) => {
+            btn.innerHTML = window.Icons.svg('layout');
+        });
+
         applyLayout();
+        wireDragAndDrop(root);
+        SIDES.forEach(renderTabs);
+        setFocus('left');
 
-        const refreshBtn = root.querySelector('[data-role="treerefresh"]');
-        if (refreshBtn) refreshBtn.innerHTML = window.Icons.svg('refresh');
-
-        loadServers().then(() => {
+        loadServers().then(async () => {
             fillServerSelects();
+            // await, not truthiness: restoreSplit is async, so the bare call
+            // returned a promise, which is always truthy, and the seeding below
+            // never ran — the left workspace opened empty every time.
+            if (window.Session && await window.Session.restoreSplit()) return;
 
-            // Seed the left pane with whatever the main editor is pointed at,
-            // so the split opens on something rather than two empty panes.
+            // Nothing to restore: seed the left workspace from the main editor
+            // so the split opens on something.
             const api = go();
             if (!api || !api.GetConfig) return;
             api.GetConfig().then((cfg) => {
                 if (!cfg || !cfg.serverID) return;
-                const sel = root.querySelector('[data-side="left"] [data-role="server"]');
+                const sel = root.querySelector('[data-space="left"] [data-role="server"]');
                 sel.value = cfg.serverID;
                 sel.dispatchEvent(new Event('change', { bubbles: true }));
             }).catch(() => {});
         });
-
-        setFocus('left');
 
         const btn = $('splitViewBtn');
         if (btn) btn.classList.add('toggled');
@@ -403,9 +615,13 @@
     }
 
     async function close() {
-        // Closing removes the textareas, so unsaved work has to be acknowledged.
-        for (const side of ['left', 'right']) {
-            if (paneState(side).dirty && !(await confirmDiscard(side))) return;
+        for (const side of SIDES) {
+            const dirty = Array.from(space(side).tabs.values()).some(t => t.dirty);
+            if (!dirty) continue;
+            const ok = await window.Shell.dialog.confirm('Unsaved changes',
+                'The ' + side + ' workspace has unsaved files. Closing the split view loses them.',
+                { danger: true, confirmLabel: 'Discard them' });
+            if (!ok) return;
         }
 
         const root = $('splitRoot');
@@ -421,6 +637,7 @@
         const btn = $('splitViewBtn');
         if (btn) btn.classList.remove('toggled');
         active = false;
+        window.Session && window.Session.save();
     }
 
     function toggle() {
@@ -432,8 +649,10 @@
 
     document.addEventListener('mousedown', (e) => {
         if (!active) return;
-        const grip = e.target.closest('#splitRoot .split-grip');
-        if (grip) startDrag(Number(grip.dataset.grip), e);
+        const outerGrip = e.target.closest('#splitRoot [data-outergrip]');
+        if (outerGrip) return dragOuter(e);
+        const innerGrip = e.target.closest('#splitRoot [data-innergrip]');
+        if (innerGrip) return dragInner(innerGrip.dataset.innergrip, e);
     });
 
     document.addEventListener('click', async (e) => {
@@ -443,36 +662,52 @@
         }
         if (!active) return;
 
-        // Focus follows the pane you click into.
-        const pane = e.target.closest('#splitRoot .split-pane');
-        if (pane) {
-            const side = pane.getAttribute('data-side');
-            if (side !== focused) setFocus(side);
+        const ws = e.target.closest('#splitRoot .ws');
+        if (!ws) return;
+        const side = ws.getAttribute('data-side');
+        if (side !== focused) setFocus(side);
 
-            const btn = e.target.closest('button');
-            if (btn && btn.dataset.role === 'save') return save(side);
+        const btn = e.target.closest('button');
+        if (btn && btn.dataset.role === 'save') return save(side);
+        if (btn && btn.dataset.role === 'wslayout') {
+            const st = space(side);
+            st.layout = st.layout === 'side' ? 'stacked' : 'side';
+            applyLayout();
+            saveLayout();
             return;
         }
 
-        const treeCol = e.target.closest('#splitRoot .split-tree');
-        if (!treeCol) return;
+        const close_ = e.target.closest('.ws-tab-close');
+        if (close_) {
+            e.stopPropagation();
+            return closeTab(side, close_.getAttribute('data-close'));
+        }
 
-        if (e.target.closest('[data-role="treerefresh"]')) return renderTree();
+        const tab = e.target.closest('.ws-tab');
+        if (tab) return showTab(side, tab.getAttribute('data-tab'));
 
-        const row = e.target.closest('.file-item');
+        const row = e.target.closest('.ws-list .file-item');
         if (!row) return;
 
-        const state = paneState(focused);
+        const st = space(side);
         if (row.dataset.updir) {
-            const parts = String(state.path).split('/').filter(Boolean);
+            const parts = String(st.path).split('/').filter(Boolean);
             parts.pop();
-            return renderTree(parts.length ? '/' + parts.join('/') : '/');
+            return browse(side, parts.length ? '/' + parts.join('/') : '/');
         }
         if (row.dataset.dir) {
-            const next = state.path === '/' ? '/' + row.dataset.name : state.path + '/' + row.dataset.name;
-            return renderTree(next);
+            return browse(side, st.path === '/' ? '/' + row.dataset.name : st.path + '/' + row.dataset.name);
         }
-        return openFile(focused, row.dataset.name);
+        return openFile(side, row.dataset.name);
+    });
+
+    // Middle-click closes a workspace tab, same as the main editor's.
+    document.addEventListener('auxclick', (e) => {
+        if (!active || e.button !== 1) return;
+        const tab = e.target.closest('#splitRoot .ws-tab');
+        if (!tab) return;
+        e.preventDefault();
+        closeTab(tab.closest('.ws').getAttribute('data-side'), tab.getAttribute('data-tab'));
     });
 
     document.addEventListener('change', async (e) => {
@@ -480,29 +715,10 @@
         const sel = e.target.closest('#splitRoot [data-role="server"]');
         if (!sel) return;
 
-        const pane = sel.closest('.split-pane');
-        const side = pane.getAttribute('data-side');
-        const state = paneState(side);
+        const side = sel.closest('.ws').getAttribute('data-side');
         const opt = sel.selectedOptions[0];
-
-        // Switching servers clears the pane. Ask before throwing edits away,
-        // and put the picker back if the answer is no.
-        if (state.dirty && !(await confirmDiscard(side))) {
-            sel.value = state.serverID;
-            return;
-        }
-
-        state.serverID = sel.value;
-        state.serverName = opt ? opt.textContent : '';
-        state.panel = opt ? (opt.dataset.panel || '') : '';
-        state.path = '/';
-        state.file = '';
-        state.original = '';
-
-        pane.querySelector('[data-role="editor"]').value = '';
-        pane.querySelector('[data-role="filename"]').textContent = 'no file open';
-        markDirty(side, false);
-
+        const ok = await setServer(side, sel.value, opt ? opt.textContent : '', opt ? opt.dataset.panel : '');
+        if (!ok) sel.value = space(side).serverID;
         setFocus(side);
     });
 
@@ -510,46 +726,118 @@
         if (!active) return;
         const editor = e.target.closest('#splitRoot [data-role="editor"]');
         if (!editor) return;
-        const side = editor.closest('.split-pane').getAttribute('data-side');
-        markDirty(side, editor.value !== paneState(side).original);
+
+        const side = editor.closest('.ws').getAttribute('data-side');
+        const st = space(side);
+        if (!st.activeTab) return;
+
+        const tab = st.tabs.get(st.activeTab);
+        tab.content = editor.value;
+        const wasDirty = tab.dirty;
+        tab.dirty = tab.content !== tab.original;
+        if (wasDirty !== tab.dirty) renderTabs(side);
+        refreshSave(side);
     });
 
     document.addEventListener('focusin', (e) => {
         if (!active) return;
-        const pane = e.target.closest && e.target.closest('#splitRoot .split-pane');
-        if (pane) {
-            const side = pane.getAttribute('data-side');
+        const ws = e.target.closest && e.target.closest('#splitRoot .ws');
+        if (ws) {
+            const side = ws.getAttribute('data-side');
             if (side !== focused) setFocus(side);
         }
     });
 
-    // Ctrl/Cmd+S saves the pane the caret is in; Shift saves both.
+    // Ctrl/Cmd+S saves the focused workspace; Shift saves both.
     //
     // stopPropagation, not just preventDefault: the hotkey manager also binds
-    // Ctrl+S, and preventDefault alone does not stop it — saving a pane used to
+    // Ctrl+S, and preventDefault alone does not stop it — saving here used to
     // save the main editor's file too.
     document.addEventListener('keydown', (e) => {
         if (!active) return;
         const isSave = (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's';
         if (!isSave) return;
 
-        const pane = document.activeElement && document.activeElement.closest
-            ? document.activeElement.closest('#splitRoot .split-pane')
+        const ws = document.activeElement && document.activeElement.closest
+            ? document.activeElement.closest('#splitRoot .ws')
             : null;
+        if (!ws && !e.shiftKey) return;
 
-        if (e.shiftKey) {
-            e.preventDefault();
-            e.stopPropagation();
-            save('left');
-            save('right');
-            return;
-        }
-        if (pane) {
-            e.preventDefault();
-            e.stopPropagation();
-            save(pane.getAttribute('data-side'));
-        }
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.shiftKey) return saveAll();
+        save(ws.getAttribute('data-side'));
     }, true);
 
-    window.SplitView = { toggle, open, close, save, isActive: () => active, focus: setFocus };
+    window.SplitView = {
+        toggle, open, close, save, saveAll,
+        isActive: () => active,
+        focus: setFocus,
+        // Session restore reaches in through these.
+        state: () => ({
+            outer: outer,
+            focused: focused,
+            spaces: SIDES.map((side) => {
+                const st = space(side);
+                return {
+                    side: side, serverID: st.serverID, serverName: st.serverName, panel: st.panel,
+                    path: st.path, layout: st.layout, explorerSize: st.explorerSize,
+                    activeTab: st.activeTab,
+                    tabs: Array.from(st.tabs.entries()).map(([path, tab]) => ({
+                        path: path, name: tab.name, dirty: tab.dirty,
+                        draft: tab.dirty ? tab.content : null
+                    }))
+                };
+            })
+        }),
+        applyState: async (state) => {
+            if (!state || !state.spaces) return false;
+            let any = false;
+
+            for (const saved of state.spaces) {
+                if (!saved.serverID) continue;
+                const st = space(saved.side);
+                const sel = el(saved.side, '[data-role="server"]');
+                if (sel) sel.value = saved.serverID;
+
+                st.serverID = saved.serverID;
+                st.serverName = saved.serverName || '';
+                st.panel = saved.panel || '';
+                st.path = saved.path || '/';
+                st.layout = saved.layout === 'stacked' ? 'stacked' : 'side';
+                st.explorerSize = typeof saved.explorerSize === 'number' ? saved.explorerSize : 32;
+                st.tabs.clear();
+
+                for (const tab of (saved.tabs || [])) {
+                    try {
+                        const read = await go().ReadFileForEdit(st.serverID, tab.path);
+                        if (read.binary || read.too_big) continue;
+                        st.tabs.set(tab.path, {
+                            name: tab.name,
+                            // A draft is what was in the box when the app went
+                            // away; original stays the panel's copy, so the
+                            // dirty marker and the conflict check both still
+                            // mean what they say.
+                            content: tab.draft != null ? tab.draft : read.content,
+                            original: read.content,
+                            dirty: tab.draft != null && tab.draft !== read.content
+                        });
+                    } catch (err) { /* file went away while we were gone */ }
+                }
+
+                st.activeTab = st.tabs.has(saved.activeTab) ? saved.activeTab
+                    : (st.tabs.size ? st.tabs.keys().next().value : null);
+
+                renderTabs(saved.side);
+                if (st.activeTab) showTab(saved.side, st.activeTab);
+                await browse(saved.side, st.path);
+                any = true;
+            }
+
+            if (Array.isArray(state.outer) && state.outer.length === 2) outer = state.outer;
+            applyLayout();
+            if (state.focused) setFocus(state.focused);
+            return any;
+        }
+    };
 })();

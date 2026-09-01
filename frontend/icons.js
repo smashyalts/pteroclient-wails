@@ -49,7 +49,10 @@
         external: '<path d="M14 4.6h5.4V10"/><path d="M19.4 4.6 11 13"/><path d="M18 14.4v4.2a1.4 1.4 0 0 1-1.4 1.4H5.4A1.4 1.4 0 0 1 4 18.6V7.4A1.4 1.4 0 0 1 5.4 6h4.2"/>',
         shield: '<path d="M12 3.4 19.4 6v6.1c0 4-3 7.2-7.4 8.5-4.4-1.3-7.4-4.5-7.4-8.5V6z"/><path d="M8.9 12.1 11.2 14.4l4-4.4"/>',
         history: '<path d="M4.1 11.4a8 8 0 1 0 2.2-6.1"/><path d="M4 4.2v4.9h4.9"/><path d="M12 7.6V12l3.1 1.9"/>',
-        undo: '<path d="M4 9.4h9.6a5.2 5.2 0 0 1 0 10.4H8.4"/><path d="M7.6 5.2 3.4 9.4l4.2 4.2"/>'
+        undo: '<path d="M4 9.4h9.6a5.2 5.2 0 0 1 0 10.4H8.4"/><path d="M7.6 5.2 3.4 9.4l4.2 4.2"/>',
+        layout: '<path d="M4 4.8h16v14.4H4z"/><path d="M9.6 4.8v14.4"/><path d="M9.6 12H20"/>',
+        columns: '<path d="M4 4.8h16v14.4H4z"/><path d="M9.3 4.8v14.4M14.7 4.8v14.4"/>',
+        drag: '<circle cx="9" cy="6.5" r="1.3"/><circle cx="15" cy="6.5" r="1.3"/><circle cx="9" cy="12" r="1.3"/><circle cx="15" cy="12" r="1.3"/><circle cx="9" cy="17.5" r="1.3"/><circle cx="15" cy="17.5" r="1.3"/>'
     };
 
     // Extensions the file tree tints and icons by kind.

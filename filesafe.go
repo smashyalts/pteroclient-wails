@@ -1564,3 +1564,122 @@ func (a *App) GetServerLogTail(maxLines int) (*LogTail, error) {
 	}
 	return out, nil
 }
+
+/* ---------------------------------------------------- cross-server copy */
+
+// CopyResult reports where a copied file landed.
+type CopyResult struct {
+	Path     string `json:"path"`
+	Size     int64  `json:"size"`
+	Replaced bool   `json:"replaced"`
+	Conflict bool   `json:"conflict"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+// CopyFileBetweenServers copies one file from any server to any other,
+// including across panels.
+//
+// The bytes never cross the bridge to the frontend: a drag-and-drop of a jar or
+// a world file would come back as mojibake if it went through JSON, so the read
+// and the write both happen here.
+//
+// A file already at the destination is reported rather than replaced, unless
+// overwrite says otherwise — and an overwrite files the displaced copy in the
+// recycle bin first, the same as every other replacement in the app.
+func (a *App) CopyFileBetweenServers(srcServer, srcPath, dstServer, dstDir string, overwrite bool) (*CopyResult, error) {
+	cleanSrc, err := normalizeRemotePath(srcPath)
+	if err != nil {
+		return nil, err
+	}
+	_, name, err := splitRemote(cleanSrc)
+	if err != nil {
+		return nil, err
+	}
+	cleanDstDir, err := normalizeRemotePath(dstDir)
+	if err != nil {
+		return nil, err
+	}
+
+	dstPath := joinRemote(cleanDstDir, name)
+	if srcServer == dstServer && cleanSrc == dstPath {
+		return nil, errors.New("that file is already there")
+	}
+
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	var payload string
+	var size int64
+
+	// Read from the source.
+	err = a.withServerClient(srcServer, func(c *pterodactyl.Client, _ string) error {
+		dir, base, splitErr := splitRemote(cleanSrc)
+		if splitErr != nil {
+			return splitErr
+		}
+		files, listErr := c.ListFiles(dir)
+		if listErr != nil {
+			return fmt.Errorf("cannot list %s: %w", dir, listErr)
+		}
+		for i := range files {
+			if files[i].Name != base {
+				continue
+			}
+			if !files[i].IsFile {
+				return fmt.Errorf("%s is a folder; only files can be dragged across", cleanSrc)
+			}
+			if files[i].Size > safestore.MaxSingleCapture {
+				return fmt.Errorf("%s is %s, too large to copy through the app", cleanSrc, humanBytes(files[i].Size))
+			}
+			size = files[i].Size
+			break
+		}
+		content, readErr := c.GetFileContent(cleanSrc)
+		if readErr != nil {
+			return readErr
+		}
+		payload = content
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	out := &CopyResult{Path: dstPath, Size: size}
+
+	err = a.withServerClient(dstServer, func(c *pterodactyl.Client, panel string) error {
+		files, listErr := c.ListFiles(cleanDstDir)
+		if listErr != nil {
+			return fmt.Errorf("cannot list %s: %w", cleanDstDir, listErr)
+		}
+
+		for i := range files {
+			if files[i].Name != name {
+				continue
+			}
+			if !files[i].IsFile {
+				return fmt.Errorf("%s is a folder on the destination; refusing to replace it with a file", dstPath)
+			}
+			if !overwrite {
+				out.Conflict = true
+				out.Reason = name + " is already in " + cleanDstDir
+				return nil
+			}
+			if _, captureErr := a.captureRemote(safestore.KindBin, c, panel, serverIDOr(dstServer, c),
+				dstPath, "replaced by a copy", files[i].Size); captureErr != nil {
+				return fmt.Errorf("refusing to copy: keeping a copy of the file it would replace failed: %w", captureErr)
+			}
+			out.Replaced = true
+			break
+		}
+
+		if out.Conflict {
+			return nil
+		}
+		return c.SaveFileContent(dstPath, payload)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}

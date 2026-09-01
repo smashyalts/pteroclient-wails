@@ -66,7 +66,10 @@
 
     function applyZoom(persist) {
         const scale = ZOOM_STEPS[zoomIndex];
-        document.documentElement.style.zoom = scale;
+        // A CSS variable, not an inline zoom: the stylesheet divides every
+        // viewport-sized rule by it, so the layout shrinks with the content
+        // instead of overflowing past the bottom of the window.
+        document.documentElement.style.setProperty('--ui-scale', String(scale));
         if (persist !== false) {
             try { localStorage.setItem('uiZoom', String(scale)); } catch (err) { /* private mode */ }
         }
