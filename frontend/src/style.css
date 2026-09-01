@@ -1932,6 +1932,16 @@ body.resizing .split-grip { background: var(--accent); }
 .ws-tab-close { flex: none; opacity: .5; font-size: 14px; line-height: 1; }
 .ws-tab-close:hover { opacity: 1; }
 
+/* Editor host: Monaco fills it, and the textarea fallback does too. */
+.ws-code {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    overflow: hidden;
+}
+
+.ws-code > .monaco-editor { flex: 1; min-width: 0; }
 .ws-editor .editor-textarea { flex: 1; min-height: 0; }
 
 .ws-foot {

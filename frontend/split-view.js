@@ -29,6 +29,10 @@
     let focused = 'left';
     const spaces = {};
 
+    // One editor per workspace, from the shared kit: Monaco when it loaded,
+    // a textarea with the same interface when it did not.
+    const editors = {};
+
     // Outer split as flex-grow for [left, right].
     let outer = [50, 50];
 
@@ -109,8 +113,7 @@
             '    <div class="ws-grip" data-innergrip="' + side + '"></div>' +
             '    <div class="ws-editor">' +
             '      <div class="ws-tabs" data-role="tabs"></div>' +
-            '      <textarea class="editor-textarea mono" data-role="editor" spellcheck="false"' +
-            '        placeholder="Pick a server, then open a file from the explorer."></textarea>' +
+            '      <div class="ws-code" data-role="editorhost"></div>' +
             '      <div class="ws-foot">' +
             '        <span class="ws-file mono" data-role="filename">no file open</span>' +
             '        <span class="spacer"></span>' +
@@ -217,6 +220,34 @@
         list.innerHTML = html || '<div class="preview-empty">Empty folder</div>';
     }
 
+    function buildEditor(side) {
+        const host = el(side, '[data-role="editorhost"]');
+        if (!host) return null;
+
+        editors[side] = window.MonacoKit.createEditor(host, {
+            value: '',
+            language: 'plaintext',
+            placeholder: 'Pick a server, then open a file from the explorer.',
+            onChange: (value) => {
+                const st = space(side);
+                if (!st.activeTab) return;
+                const tab = st.tabs.get(st.activeTab);
+                if (!tab) return;
+
+                tab.content = value;
+                const wasDirty = tab.dirty;
+                tab.dirty = tab.content !== tab.original;
+                if (wasDirty !== tab.dirty) renderTabs(side);
+                refreshSave(side);
+            }
+        });
+        return editors[side];
+    }
+
+    function editor(side) {
+        return editors[side] || buildEditor(side);
+    }
+
     /* ---------------------------------------------------------------- tabs */
 
     function renderTabs(side) {
@@ -245,8 +276,9 @@
         if (!tab) return;
 
         st.activeTab = path;
-        const editor = el(side, '[data-role="editor"]');
-        editor.value = tab.content;
+        // A model per file, so switching tabs keeps each one's undo history and
+        // cursor instead of resetting them.
+        editor(side).setModel(path, tab.content, window.MonacoKit.languageFor(tab.name));
         el(side, '[data-role="filename"]').textContent = path;
         renderTabs(side);
         refreshSave(side);
@@ -265,6 +297,8 @@
         }
 
         st.tabs.delete(path);
+        editor(side).dropModel(path);
+
         if (st.activeTab === path) {
             const next = st.tabs.keys().next();
             st.activeTab = next.done ? null : next.value;
@@ -273,7 +307,7 @@
         if (st.activeTab) {
             showTab(side, st.activeTab);
         } else {
-            el(side, '[data-role="editor"]').value = '';
+            editor(side).setValue('');
             el(side, '[data-role="filename"]').textContent = 'no file open';
             renderTabs(side);
             refreshSave(side);
@@ -286,9 +320,6 @@
         const full = st.path === '/' ? '/' + name : st.path + '/' + name;
 
         if (st.tabs.has(full)) return showTab(side, full);
-
-        const editor = el(side, '[data-role="editor"]');
-        editor.disabled = true;
 
         try {
             // Same guard as the main editor: a binary or oversized file loaded
@@ -305,8 +336,6 @@
             window.Session && window.Session.save();
         } catch (err) {
             window.UX.toast.bad(String(err));
-        } finally {
-            editor.disabled = false;
         }
     }
 
@@ -339,6 +368,11 @@
         btn.textContent = 'Saving…';
 
         try {
+            // Read straight from the editor rather than trusting the cached
+            // copy: with Monaco the two are kept in step by onChange, and a
+            // dropped event would otherwise save stale text.
+            tab.content = editor(side).getValue();
+
             const res = await go().SafeSaveFileContentToServer(
                 st.serverID, st.activeTab, tab.content, tab.original, !!force);
 
@@ -407,10 +441,11 @@
         st.serverName = name || '';
         st.panel = panel || '';
         st.path = '/';
+        st.tabs.forEach((_tab, path) => editor(side).dropModel(path));
         st.tabs.clear();
         st.activeTab = null;
 
-        el(side, '[data-role="editor"]').value = '';
+        editor(side).setValue('');
         el(side, '[data-role="filename"]').textContent = 'no file open';
         renderTabs(side);
         refreshSave(side);
@@ -587,7 +622,7 @@
 
         applyLayout();
         wireDragAndDrop(root);
-        SIDES.forEach(renderTabs);
+        SIDES.forEach((side) => { buildEditor(side); renderTabs(side); });
         setFocus('left');
 
         loadServers().then(async () => {
@@ -623,6 +658,12 @@
                 { danger: true, confirmLabel: 'Discard them' });
             if (!ok) return;
         }
+
+        SIDES.forEach((side) => {
+            if (!editors[side]) return;
+            editors[side].dispose();
+            delete editors[side];
+        });
 
         const root = $('splitRoot');
         if (root) root.remove();
@@ -722,24 +763,7 @@
         setFocus(side);
     });
 
-    document.addEventListener('input', (e) => {
-        if (!active) return;
-        const editor = e.target.closest('#splitRoot [data-role="editor"]');
-        if (!editor) return;
-
-        const side = editor.closest('.ws').getAttribute('data-side');
-        const st = space(side);
-        if (!st.activeTab) return;
-
-        const tab = st.tabs.get(st.activeTab);
-        tab.content = editor.value;
-        const wasDirty = tab.dirty;
-        tab.dirty = tab.content !== tab.original;
-        if (wasDirty !== tab.dirty) renderTabs(side);
-        refreshSave(side);
-    });
-
-    document.addEventListener('focusin', (e) => {
+document.addEventListener('focusin', (e) => {
         if (!active) return;
         const ws = e.target.closest && e.target.closest('#splitRoot .ws');
         if (ws) {
@@ -828,6 +852,7 @@
                 st.activeTab = st.tabs.has(saved.activeTab) ? saved.activeTab
                     : (st.tabs.size ? st.tabs.keys().next().value : null);
 
+                buildEditor(saved.side);
                 renderTabs(saved.side);
                 if (st.activeTab) showTab(saved.side, st.activeTab);
                 await browse(saved.side, st.path);

@@ -1,25 +1,9 @@
 // Monaco Editor Integration for Pterodactyl Manager
 console.log('Monaco Editor Integration loading...');
 
-// Language configurations
-const LANGUAGE_MAP = {
-    'js': 'javascript', 'jsx': 'javascript',
-    'ts': 'typescript', 'tsx': 'typescript',
-    'py': 'python', 'rb': 'ruby', 'go': 'go',
-    'rs': 'rust', 'java': 'java', 'kt': 'kotlin',
-    'cpp': 'cpp', 'c': 'c', 'cs': 'csharp',
-    'php': 'php', 'swift': 'swift',
-    'html': 'html', 'htm': 'html',
-    'css': 'css', 'scss': 'scss', 'less': 'less',
-    'json': 'json', 'xml': 'xml',
-    'yaml': 'yaml', 'yml': 'yaml',
-    'toml': 'toml', 'ini': 'ini',
-    'conf': 'ini', 'cfg': 'ini',
-    'md': 'markdown', 'txt': 'plaintext',
-    'sh': 'shell', 'bash': 'shell',
-    'dockerfile': 'dockerfile',
-    'sql': 'sql', 'log': 'log'
-};
+// Languages and the filename -> language rules live in monaco-kit.js, so the
+// split view's editors resolve them the same way this one does.
+const languageFor = (name) => (window.MonacoKit ? window.MonacoKit.languageFor(name) : 'plaintext');
 
 // Initialize Monaco
 // The Monaco loader is fetched from a CDN. When that fetch fails — no
@@ -60,6 +44,10 @@ function loadMonacoEditor() {
     require(['vs/editor/editor.main'], function() {
         console.log('Monaco loaded, defining themes...');
         defineCustomThemes();
+        // Before anything creates a model: Monaco ships no TOML and no
+        // .properties definition, and a model made with an unregistered
+        // language id stays plain text even after the language turns up.
+        if (window.MonacoKit) window.MonacoKit.registerLanguages();
         enhanceApp();
     });
 }
@@ -174,6 +162,16 @@ function defineCustomThemes() {
             // Regex
             { token: 'constant.character.escape', foreground: 'FF79C6' },
             
+            // TOML and .properties: table headers, keys, escapes
+            { token: 'type.toml', foreground: '8BE9FD', fontStyle: 'bold' },
+            { token: 'property.toml', foreground: '50FA7B' },
+            { token: 'property.properties', foreground: '50FA7B' },
+            { token: 'string.escape', foreground: 'FF79C6' },
+            { token: 'string.escape.invalid', foreground: 'FF5555' },
+            { token: 'invalid', foreground: 'FF5555', fontStyle: 'bold' },
+            { token: 'operator.toml', foreground: 'FF79C6' },
+            { token: 'operator.properties', foreground: 'FF79C6' },
+
             // Delimiters and Brackets
             { token: 'delimiter', foreground: 'F8F8F2' },
             { token: 'delimiter.bracket', foreground: 'F8F8F2' },
@@ -393,8 +391,7 @@ function replaceEditor() {
             // there is nothing open to point a model at.
             if (!filePath || !this.openFiles.has(filePath)) return result;
 
-            const ext = file.name.split('.').pop().toLowerCase();
-            const language = LANGUAGE_MAP[ext] || 'plaintext';
+            const language = languageFor(file.name);
 
             let model = monacoModels.get(filePath);
             if (!model) {
@@ -409,10 +406,10 @@ function replaceEditor() {
             const typeEl = document.getElementById('fileType');
             if (typeEl) {
                 const types = {
-                    javascript: 'JavaScript', python: 'Python',
-                    yaml: 'YAML', json: 'JSON', html: 'HTML',
-                    css: 'CSS', markdown: 'Markdown',
-                    plaintext: 'Plain Text'
+                    javascript: 'JavaScript', typescript: 'TypeScript', python: 'Python',
+                    yaml: 'YAML', json: 'JSON', html: 'HTML', css: 'CSS',
+                    markdown: 'Markdown', toml: 'TOML', properties: 'Properties',
+                    ini: 'INI', shell: 'Shell', plaintext: 'Plain Text', log: 'Log'
                 };
                 typeEl.textContent = types[language] || language;
             }
@@ -434,10 +431,7 @@ function replaceEditor() {
             const file = this.openFiles.get(path);
 
             if (file && !model) {
-                // Detect language
-                const ext = file.name.split('.').pop().toLowerCase();
-                const language = LANGUAGE_MAP[ext] || 'plaintext';
-                model = monaco.editor.createModel(file.content, language);
+                model = monaco.editor.createModel(file.content, languageFor(file.name));
                 monacoModels.set(path, model);
             }
 
