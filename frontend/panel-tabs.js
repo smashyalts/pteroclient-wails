@@ -257,19 +257,34 @@
             return;
         }
 
-        html += rows(vars.map((v) => (
-            '<div class="list-row">' +
-            '<span class="list-main">' +
-            '<span class="list-title">' + esc(v.name) + (v.is_editable ? '' : ' <span class="tag muted">Read only</span>') + '</span>' +
-            '<span class="list-sub">' + esc(v.env_variable) + ' · ' + esc(v.description || '') + '</span>' +
-            '</span>' +
-            '<span class="list-meta mono">' + esc(v.server_value === '' ? '(empty)' : v.server_value) + '</span>' +
-            '<span class="list-actions">' +
-            (v.is_editable
-                ? '<button class="sm" data-var-key="' + esc(v.env_variable) + '" data-var-name="' + esc(v.name) + '" data-var-value="' + esc(v.server_value || '') + '" data-var-rules="' + esc(v.rules || '') + '" type="button">Edit</button>'
-                : '') +
-            '</span></div>'
-        )));
+        // A variable is a name, a description and a value with no upper bound
+        // on its length — a block, not a row. As a row the value pushed the
+        // name column down to nothing.
+        const LONG = 180;
+
+        html += '<div class="card">' + vars.map((v) => {
+            const value = v.server_value === '' || v.server_value == null ? '' : String(v.server_value);
+            const long = value.length > LONG;
+
+            return '<div class="var-row">' +
+                '<div class="var-head">' +
+                '<span class="var-name">' + esc(v.name) +
+                (v.is_editable ? '' : ' <span class="tag muted">Read only</span>') + '</span>' +
+                '<span class="spacer"></span>' +
+                (v.is_editable
+                    ? '<button class="sm" data-var-key="' + esc(v.env_variable) +
+                      '" data-var-name="' + esc(v.name) +
+                      '" data-var-value="' + esc(value) +
+                      '" data-var-rules="' + esc(v.rules || '') + '" type="button">Edit</button>'
+                    : '') +
+                '</div>' +
+                '<div class="var-meta mono">' + esc(v.env_variable) +
+                (v.description ? ' <span class="var-desc">' + esc(v.description) + '</span>' : '') + '</div>' +
+                '<div class="var-value mono' + (long ? ' clipped' : '') + '">' +
+                (value ? esc(value) : '<span class="var-empty">(empty)</span>') + '</div>' +
+                (long ? '<button class="var-more" type="button" data-var-expand="1">Show all</button>' : '') +
+                '</div>';
+        }).join('') + '</div>';
 
         target.innerHTML = html;
     });
@@ -590,11 +605,25 @@
         }
 
         /* startup */
+        if (el.dataset.varExpand) {
+            const value = el.previousElementSibling;
+            const open = value.classList.toggle('clipped');
+            el.textContent = open ? 'Show all' : 'Show less';
+            return;
+        }
         if (el.dataset.varKey) {
+            const current = el.dataset.varValue || '';
+            // A single-line input for six hundred characters of JVM flags is
+            // not an edit box, it is a keyhole.
+            const long = current.length > 120 || current.indexOf('\n') !== -1;
             const v = await D.form('Edit ' + el.dataset.varName, [
-                { name: 'value', label: el.dataset.varKey, value: el.dataset.varValue, mono: true, hint: el.dataset.varRules ? 'Rules: <span class="mono">' + esc(el.dataset.varRules) + '</span>' : '' }
+                {
+                    name: 'value', label: el.dataset.varKey, value: current, mono: true,
+                    type: long ? 'textarea' : 'text', rows: 8,
+                    hint: el.dataset.varRules ? 'Rules: <span class="mono">' + esc(el.dataset.varRules) + '</span>' : ''
+                }
             ]);
-            if (v) guard(() => api.SetStartupVariable(el.dataset.varKey, v.value), 'startup');
+            if (v) guard(() => api.SetStartupVariable(el.dataset.varKey, String(v.value).trim()), 'startup');
             return;
         }
         if (el.dataset.image) {

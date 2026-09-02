@@ -19,7 +19,9 @@ package main
 // eviction) so an accepted delete is still recoverable.
 
 import (
+	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -1981,4 +1983,313 @@ func (a *App) lastKnownServers() []pterodactyl.ServerInfo {
 		return nil
 	}
 	return servers
+}
+
+/* ------------------------------------------------------------- searching */
+
+// SearchHit is one file or folder a recursive search turned up.
+type SearchHit struct {
+	Path  string `json:"path"`
+	Name  string `json:"name"`
+	Dir   string `json:"dir"`
+	Size  int64  `json:"size"`
+	IsDir bool   `json:"is_dir"`
+}
+
+// SearchOutcome is what a walk found, and what it had to leave out.
+type SearchOutcome struct {
+	Query     string      `json:"query"`
+	Root      string      `json:"root"`
+	Hits      []SearchHit `json:"hits"`
+	Scanned   int         `json:"scanned"`
+	Folders   int         `json:"folders"`
+	Truncated bool        `json:"truncated"`
+	Reason    string      `json:"reason,omitempty"`
+}
+
+// Bounds for a recursive search. Each folder is one API round trip, so a deep
+// tree is a lot of them; these keep a stray search from becoming a thousand
+// requests to somebody's panel.
+const (
+	searchMaxFolders = 600
+	searchMaxHits    = 400
+	searchMaxDepth   = 12
+	searchDeadline   = 20 * time.Second
+)
+
+// SearchFiles walks the tree under root looking for names containing query.
+//
+// The panel has no search endpoint, so this is a breadth-first walk of the
+// listing API — one request per folder. Breadth-first rather than depth-first
+// because the thing being looked for is usually near the top, and hitting the
+// folder ceiling then means the shallow half was covered rather than one deep
+// branch.
+func (a *App) SearchFiles(root, query string) (*SearchOutcome, error) {
+	needle := strings.ToLower(strings.TrimSpace(query))
+	if needle == "" {
+		return nil, errors.New("nothing to search for")
+	}
+
+	cleanRoot, err := normalizeRemotePath(root)
+	if err != nil {
+		return nil, err
+	}
+
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	out := &SearchOutcome{Query: query, Root: cleanRoot, Hits: []SearchHit{}}
+	started := time.Now()
+
+	err = a.withServerClient("", func(c *pterodactyl.Client, _ string) error {
+		type todo struct {
+			path  string
+			depth int
+		}
+		queue := []todo{{path: cleanRoot, depth: 0}}
+
+		for len(queue) > 0 {
+			if out.Folders >= searchMaxFolders {
+				out.Truncated = true
+				out.Reason = fmt.Sprintf("stopped after %d folders", searchMaxFolders)
+				break
+			}
+			if len(out.Hits) >= searchMaxHits {
+				out.Truncated = true
+				out.Reason = fmt.Sprintf("stopped at %d matches", searchMaxHits)
+				break
+			}
+			if time.Since(started) > searchDeadline {
+				out.Truncated = true
+				out.Reason = "stopped after " + searchDeadline.String()
+				break
+			}
+
+			current := queue[0]
+			queue = queue[1:]
+
+			files, listErr := c.ListFiles(current.path)
+			if listErr != nil {
+				// A folder that cannot be read is skipped rather than failing
+				// the whole search; permissions vary inside a container.
+				continue
+			}
+			out.Folders++
+
+			for i := range files {
+				f := files[i]
+				out.Scanned++
+
+				full := joinRemote(current.path, f.Name)
+				isDir := !f.IsFile && !f.IsSymlink
+
+				if strings.Contains(strings.ToLower(f.Name), needle) && len(out.Hits) < searchMaxHits {
+					out.Hits = append(out.Hits, SearchHit{
+						Path:  full,
+						Name:  f.Name,
+						Dir:   current.path,
+						Size:  f.Size,
+						IsDir: isDir,
+					})
+				}
+
+				// Symlinks are not followed: a link pointing up the tree turns
+				// the walk into a loop.
+				if isDir && current.depth < searchMaxDepth {
+					queue = append(queue, todo{path: full, depth: current.depth + 1})
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+/* -------------------------------------------------------------- uploads */
+
+// UploadItem is one file in a batch. Content is base64.
+//
+// Not a []byte: Wails marshals call arguments as JSON, and a byte slice
+// arrives from JavaScript as an array of numbers — roughly four characters of
+// JSON per byte, plus an allocation each. Base64 is one string at 1.33x, which
+// is where most of an upload's wall time was going.
+type UploadItem struct {
+	RelPath string `json:"rel_path"`
+	Base64  string `json:"base64"`
+}
+
+// UploadOutcome reports a batch, item by item.
+type UploadOutcome struct {
+	Uploaded  []string `json:"uploaded"`
+	Replaced  []string `json:"replaced"`
+	Conflicts []string `json:"conflicts"`
+	Failed    []string `json:"failed"`
+	Bytes     int64    `json:"bytes"`
+}
+
+// UploadBatch writes several files under baseDir in one pass.
+//
+// One call rather than one per file, because each one used to take the file
+// lock, list its target directory and make its own round trip — fifty files
+// into one folder meant fifty identical listings. Directories are created
+// once, each target directory is listed once, and the lock is held once.
+//
+// keepCopy controls whether a file being replaced is copied to the recycle bin
+// first. That copy is a full download of the old file, so turning it off is
+// the difference between one request per replacement and two — at the cost of
+// the replacement being unrecoverable.
+func (a *App) UploadBatch(baseDir string, items []UploadItem, overwrite, keepCopy bool) (*UploadOutcome, error) {
+	if len(items) == 0 {
+		return nil, errors.New("nothing to upload")
+	}
+
+	base, err := normalizeRemotePath(baseDir)
+	if err != nil {
+		return nil, err
+	}
+
+	type prepared struct {
+		dir     string
+		name    string
+		path    string
+		content []byte
+	}
+
+	ready := make([]prepared, 0, len(items))
+	out := &UploadOutcome{
+		Uploaded: []string{}, Replaced: []string{}, Conflicts: []string{}, Failed: []string{},
+	}
+
+	// Decode before touching the network, so a malformed item fails fast and
+	// on its own rather than halfway through a batch.
+	for _, item := range items {
+		rel := strings.TrimPrefix(strings.ReplaceAll(item.RelPath, "\\", "/"), "/")
+		if rel == "" {
+			out.Failed = append(out.Failed, item.RelPath+" — no name")
+			continue
+		}
+
+		full, pathErr := normalizeRemotePath(joinRemote(base, rel))
+		if pathErr != nil {
+			out.Failed = append(out.Failed, item.RelPath+" — "+pathErr.Error())
+			continue
+		}
+		dir, name, splitErr := splitRemote(full)
+		if splitErr != nil {
+			out.Failed = append(out.Failed, item.RelPath+" — "+splitErr.Error())
+			continue
+		}
+
+		content, decodeErr := base64.StdEncoding.DecodeString(item.Base64)
+		if decodeErr != nil {
+			out.Failed = append(out.Failed, item.RelPath+" — could not be decoded")
+			continue
+		}
+
+		ready = append(ready, prepared{dir: dir, name: name, path: full, content: content})
+	}
+
+	if len(ready) == 0 {
+		return out, nil
+	}
+
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	err = a.withServerClient("", func(c *pterodactyl.Client, panel string) error {
+		// Every directory the batch needs, shallowest first so each one has a
+		// parent by the time it is made. Already-exists is the normal case.
+		dirs := map[string]bool{}
+		for _, item := range ready {
+			dirs[item.dir] = true
+		}
+		ordered := make([]string, 0, len(dirs))
+		for dir := range dirs {
+			ordered = append(ordered, dir)
+		}
+		sort.Slice(ordered, func(i, j int) bool { return len(ordered[i]) < len(ordered[j]) })
+
+		for _, dir := range ordered {
+			if dir == "/" || dir == base {
+				continue
+			}
+			parent, name, splitErr := splitRemote(dir)
+			if splitErr != nil {
+				continue
+			}
+			_ = c.CreateDirectory(parent, name)
+		}
+
+		// One listing per directory, reused for every file going into it.
+		existing := map[string]map[string]pterodactyl.FileInfo{}
+		listOf := func(dir string) map[string]pterodactyl.FileInfo {
+			if cached, ok := existing[dir]; ok {
+				return cached
+			}
+			byName := map[string]pterodactyl.FileInfo{}
+			if files, listErr := c.ListFiles(dir); listErr == nil {
+				for i := range files {
+					byName[files[i].Name] = files[i]
+				}
+			}
+			existing[dir] = byName
+			return byName
+		}
+
+		for _, item := range ready {
+			here := listOf(item.dir)
+
+			if found, clash := here[item.name]; clash {
+				if !overwrite {
+					out.Conflicts = append(out.Conflicts, item.path)
+					continue
+				}
+				if !found.IsFile {
+					out.Failed = append(out.Failed, item.path+" — a folder is already there")
+					continue
+				}
+				if keepCopy {
+					if _, captureErr := a.captureRemote(safestore.KindBin, c, panel, c.GetServerID(),
+						item.path, "replaced by an upload", found.Size); captureErr != nil {
+						out.Failed = append(out.Failed, item.path+" — keeping a copy failed: "+captureErr.Error())
+						continue
+					}
+				}
+				out.Replaced = append(out.Replaced, item.path)
+			} else {
+				out.Uploaded = append(out.Uploaded, item.path)
+			}
+
+			if uploadErr := c.UploadFile(item.dir, item.name, bytes.NewReader(item.content)); uploadErr != nil {
+				// Take it back out of whichever list it was optimistically added to.
+				out.Uploaded = withoutLast(out.Uploaded, item.path)
+				out.Replaced = withoutLast(out.Replaced, item.path)
+				out.Failed = append(out.Failed, item.path+" — "+uploadErr.Error())
+				continue
+			}
+
+			out.Bytes += int64(len(item.content))
+			// The directory now holds it, so a second file with the same name
+			// later in the batch is seen as the clash it is.
+			here[item.name] = pterodactyl.FileInfo{Name: item.name, IsFile: true, Size: int64(len(item.content))}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// withoutLast removes the last occurrence of value, for undoing an optimistic append.
+func withoutLast(list []string, value string) []string {
+	for i := len(list) - 1; i >= 0; i-- {
+		if list[i] == value {
+			return append(list[:i], list[i+1:]...)
+		}
+	}
+	return list
 }

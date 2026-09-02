@@ -55,6 +55,13 @@
     --bg-tertiary: var(--line-strong);
 }
 
+/* The UA rule for this is [hidden] { display: none }, which loses to any
+   class that sets display — and most of the things this app hides are flex.
+   Filtering the file list hid nothing at all without this. */
+[hidden] {
+    display: none !important;
+}
+
 * {
     margin: 0;
     padding: 0;
@@ -2256,4 +2263,157 @@ body.console-window .logo-sub::after { content: " · console"; }
     outline: 2px dashed var(--accent);
     outline-offset: -4px;
     background: rgba(75, 142, 247, .06);
+}
+
+/* ========================================================================
+   Startup variables
+   ------------------------------------------------------------------------
+   Laid out as blocks. As flex rows the value column had no width limit, so
+   a long one squeezed the name to nothing and wrapped over the top of it.
+   ==================================================================== */
+
+.var-row {
+    padding: 13px 16px;
+    border-bottom: 1px solid var(--line);
+}
+
+.var-row:last-child { border-bottom: none; }
+.var-row:hover { background: var(--bg-raised); }
+
+.var-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.var-head .spacer { flex: 1; }
+
+.var-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.var-meta {
+    margin-top: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-dim);
+}
+
+.var-desc {
+    font-family: var(--font-ui);
+    color: var(--text-faint);
+}
+
+.var-value {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    font-size: 11.5px;
+    line-height: 1.65;
+    color: var(--text-secondary);
+    /* Long single-token values — a classpath, a flag string — have to be
+       allowed to break mid-word or they scroll off sideways forever. */
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.var-value.clipped {
+    max-height: 5.2em;
+    overflow: hidden;
+    -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
+    mask-image: linear-gradient(to bottom, #000 60%, transparent);
+}
+
+.var-empty { color: var(--text-ghost); }
+
+.var-more {
+    margin-top: 6px;
+    padding: 0;
+    height: auto;
+    border: 0;
+    background: none;
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--accent-bright);
+    cursor: pointer;
+}
+
+.var-more:hover { background: none; text-decoration: underline; }
+
+/* ========================================================================
+   Explorer detail columns
+   ==================================================================== */
+
+.file-date {
+    flex: none;
+    min-width: 62px;
+    text-align: right;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--text-faint);
+    white-space: nowrap;
+}
+
+.file-mode {
+    display: none;
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--text-ghost);
+    white-space: nowrap;
+}
+
+/* Details mode adds the permission bits; the date is always there. */
+.file-tree.details .file-mode,
+.ws-list.details .file-mode { display: inline; }
+
+/* The name gives way first — it is the one thing that can be truncated and
+   still leave the row useful, since the full path is in the tooltip. */
+.file-item .file-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ========================================================================
+   Search results
+   ==================================================================== */
+
+.search-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+    padding: 9px 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--bg-raised);
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--text-secondary);
+}
+
+.search-head button { margin-left: auto; }
+.search-warn { color: var(--warning-text); }
+
+.search-where {
+    flex: none;
+    max-width: 42%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;          /* keep the deepest folder visible when it clips */
+    text-align: right;
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--text-faint);
 }

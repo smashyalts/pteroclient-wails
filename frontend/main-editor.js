@@ -150,6 +150,9 @@ function initApp() {
         commandCursor: -1,
         // Live filter over the rows already rendered for this folder.
         filterQuery: '',
+        // Set while showing the results of a recursive search instead of a
+        // folder listing.
+        searchResults: null,
         isConnected: false,
         consoleConnected: false,
         // Set while the panel form is editing an existing panel rather than
@@ -283,6 +286,7 @@ function initApp() {
         setupKeyboardShortcuts() {
             this.restoreCommandHistory();
             this.restoreTreeDock();
+            this.restoreFileDetails();
         },
 
         restoreCommandHistory() {
@@ -409,6 +413,10 @@ function initApp() {
                 // input, not keyup: it fires for paste and for held keys too.
                 filterInput.addEventListener('input', () => this.setFilter(filterInput.value));
                 filterInput.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        return this.searchTree(filterInput.value);
+                    }
                     if (e.key !== 'Escape') return;
                     e.stopPropagation();
                     filterInput.value = '';
@@ -681,7 +689,105 @@ function initApp() {
 
         setFilter(query) {
             this.filterQuery = query || '';
+            // Typing again goes back to filtering the folder; leaving the
+            // results up while the word changed under them would be a lie.
+            if (this.searchResults) {
+                this.searchResults = null;
+                this.refreshFiles();
+                return;
+            }
             this.applyFilter();
+        },
+
+        /**
+         * Walks everything below the current folder for `query`.
+         *
+         * The panel has no search endpoint, so this is one listing request per
+         * folder, breadth first and bounded — the backend stops at 600 folders,
+         * 400 matches or twenty seconds and says which.
+         */
+        async searchTree(query) {
+            const needle = String(query || '').trim();
+            if (!needle) return;
+
+            const root = this.currentPath || '/';
+            const busy = window.UX.toast.show('Searching everything under ' + root + '…', { duration: 60000 });
+
+            let result;
+            try {
+                result = await window.go.main.App.SearchFiles(root, needle);
+            } catch (err) {
+                busy.dismiss();
+                await this.say('Search failed', String(err));
+                return;
+            }
+            busy.dismiss();
+
+            this.searchResults = result;
+            this.renderSearchResults(result);
+
+            if (!result.hits.length) {
+                window.UX.toast.warn('Nothing under ' + root + ' matches "' + needle + '"');
+            } else if (result.truncated) {
+                window.UX.toast.warn(result.hits.length + ' found — ' + result.reason);
+            } else {
+                window.UX.toast.ok(result.hits.length + ' found in ' + result.folders + ' folder(s)');
+            }
+        },
+
+        /** Draws search hits in place of the folder listing. */
+        renderSearchResults(result) {
+            const tree = document.getElementById('fileTree');
+            if (!tree) return;
+
+            tree.innerHTML = '';
+            this.renderedRows = [];
+            this.clearSelection();
+
+            const head = document.createElement('div');
+            head.className = 'search-head';
+            head.innerHTML =
+                '<span>' + result.hits.length + ' match' + (result.hits.length === 1 ? '' : 'es') +
+                ' under <span class="mono">' + this.escapeHtml(result.root) + '</span></span>' +
+                (result.truncated ? '<span class="search-warn">' + this.escapeHtml(result.reason) + '</span>' : '') +
+                '<button class="sm" id="searchBackBtn" type="button">Back to the folder</button>';
+            tree.appendChild(head);
+
+            result.hits.forEach((hit) => {
+                const entry = {
+                    name: hit.name,
+                    isDir: hit.is_dir,
+                    size: hit.size,
+                    path: hit.path
+                };
+                const row = this.createFileItem(entry);
+                // The folder it was found in is the whole point of a search
+                // result, so it replaces the size column's neighbours.
+                const where = document.createElement('span');
+                where.className = 'search-where mono';
+                where.textContent = hit.dir;
+                where.title = hit.path;
+                row.insertBefore(where, row.querySelector('.file-size'));
+                tree.appendChild(row);
+            });
+
+            if (!result.hits.length) {
+                const none = document.createElement('div');
+                none.className = 'preview-empty';
+                none.textContent = 'Nothing matched';
+                tree.appendChild(none);
+            }
+
+            const back = document.getElementById('searchBackBtn');
+            if (back) {
+                back.addEventListener('click', () => {
+                    this.searchResults = null;
+                    const box = document.getElementById('fileFilter');
+                    if (box) box.value = '';
+                    this.filterQuery = '';
+                    this.refreshFiles();
+                });
+            }
         },
 
         focusFilter() {
@@ -698,9 +804,11 @@ function initApp() {
             // Resolved once, at render time, and carried on the row. Every
             // action on this row uses it instead of recomputing from
             // currentPath, which may have moved on by then.
+            // A search hit arrives with its own path from somewhere else in
+            // the tree; everything else is relative to the folder on screen.
             const fullPath = isParent
                 ? null
-                : (this.currentPath === '/' ? '/' + file.name : this.currentPath + '/' + file.name);
+                : (file.path || (this.currentPath === '/' ? '/' + file.name : this.currentPath + '/' + file.name));
             const entry = isParent ? null : Object.assign({}, file, { path: fullPath });
             div.dataset.path = fullPath || '';
             
@@ -716,10 +824,29 @@ function initApp() {
             const size = document.createElement('span');
             size.className = 'file-size';
             size.textContent = file.isDir ? '' : this.formatSize(file.size);
-            
+
+            // When it changed, short enough to fit a narrow pane, with the
+            // full timestamp on hover.
+            const date = document.createElement('span');
+            date.className = 'file-date';
+            if (!isParent) {
+                date.textContent = this.formatWhen(file.modTime);
+                date.title = this.formatWhenFull(file.modTime);
+            }
+
+            const mode = document.createElement('span');
+            mode.className = 'file-mode';
+            if (!isParent) mode.textContent = file.mode || '';
+
+            if (!isParent) {
+                name.title = fullPath + (file.isSymlink ? ' (symlink)' : '');
+            }
+
             div.appendChild(icon);
             div.appendChild(name);
             div.appendChild(size);
+            div.appendChild(date);
+            div.appendChild(mode);
             
             if (!isParent && !file.isDir) {
                 div.setAttribute('draggable', 'true');
@@ -773,6 +900,15 @@ function initApp() {
                 if (file.isDir) {
                     div.classList.add('opening');
                     this.loadFiles(fullPath);
+                } else if (this.searchResults) {
+                    // A hit lives somewhere else; open its folder so the tree
+                    // and the editor agree about where we are.
+                    const parent = fullPath.slice(0, fullPath.lastIndexOf('/')) || '/';
+                    this.searchResults = null;
+                    const box = document.getElementById('fileFilter');
+                    if (box) box.value = '';
+                    this.filterQuery = '';
+                    this.loadFiles(parent).then(() => this.openFile(entry));
                 } else {
                     this.openFile(entry);
                 }
@@ -1387,6 +1523,7 @@ function initApp() {
                 return { entries: out.slice(0, MAX), truncated: out.length > MAX };
             }
 
+
             let truncated = false;
 
             async function walk(entry, prefix) {
@@ -1418,81 +1555,103 @@ function initApp() {
         },
 
         /**
+         * Base64 for one file, read natively.
+         *
+         * readAsDataURL is the browser's own encoder; building it in JS means
+         * btoa over a String.fromCharCode of the whole buffer, which blows the
+         * argument limit on anything sizeable.
+         */
+        fileToBase64(file) {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onerror = () => reject(reader.error);
+                reader.onload = () => {
+                    const url = String(reader.result);
+                    resolve(url.slice(url.indexOf(',') + 1));
+                };
+                reader.readAsDataURL(file);
+            });
+        },
+
+        /**
          * Uploads a walked drop into the current folder.
          *
-         * Collisions are gathered and asked about once. Answering no leaves
-         * every existing file alone and still uploads the rest.
+         * One batched call rather than one per file: the backend creates the
+         * folders once, lists each target directory once, and holds the file
+         * lock once. Collisions come back as a list and are asked about
+         * together.
          */
         async uploadDrop(entries, truncated) {
             if (!entries.length) return;
 
-            const base = this.currentPath === '/' ? '' : this.currentPath;
-            const busy = window.UX.toast.show('Uploading ' + entries.length + ' file(s)…', { duration: 600000 });
+            const busy = window.UX.toast.show('Reading ' + entries.length + ' file(s)…', { duration: 600000 });
 
-            // Parent folders first, deepest last, so each one has somewhere to
-            // go. Already-exists is the normal case and not an error.
-            const folders = new Set();
-            entries.forEach((e) => {
-                const parts = e.relPath.split('/');
-                parts.pop();
-                let acc = '';
-                parts.forEach((part) => {
-                    acc += '/' + part;
-                    folders.add(acc);
-                });
-            });
+            const items = [];
+            const failed = [];
+            let bytes = 0;
 
-            for (const folder of Array.from(folders).sort()) {
+            for (const entry of entries) {
                 try {
-                    await window.go.main.App.CreateFolder(base + folder);
+                    const b64 = await this.fileToBase64(entry.file);
+                    items.push({ rel_path: entry.relPath, base64: b64 });
+                    bytes += entry.file.size || 0;
                 } catch (err) {
-                    if (String(err).indexOf('already exists') === -1) {
-                        console.warn('Could not create ' + folder + ':', err);
-                    }
+                    failed.push(entry.relPath + ' — could not be read');
                 }
             }
 
-            const clashes = [];
-            const failed = [];
-            let done = 0;
-
-            for (const entry of entries) {
-                const target = base + '/' + entry.relPath;
-                let bytes;
-                try {
-                    bytes = Array.from(new Uint8Array(await entry.file.arrayBuffer()));
-                } catch (err) {
-                    failed.push(entry.relPath + ' — could not be read');
-                    continue;
-                }
-
-                try {
-                    await window.go.main.App.UploadFileSafe(target, bytes, false);
-                    done++;
-                } catch (err) {
-                    if (String(err).indexOf('already exists') !== -1) clashes.push({ entry: entry, target: target, bytes: bytes });
-                    else failed.push(entry.relPath + ' — ' + err);
-                }
+            if (!items.length) {
+                busy.dismiss();
+                if (failed.length) await this.say('Nothing could be read', failed.join('\n'));
+                return;
             }
 
             busy.dismiss();
+            const sending = window.UX.toast.show(
+                'Uploading ' + items.length + ' file(s), ' + this.formatSize(bytes) + '…', { duration: 600000 });
 
-            if (clashes.length) {
-                const ok = await this.ask(clashes.length + ' already there',
-                    clashes.slice(0, 8).map(c => '<span class="mono">' + this.escapeHtml(c.entry.relPath) + '</span>').join('<br>') +
-                    (clashes.length > 8 ? '<br>…and ' + (clashes.length - 8) + ' more' : '') +
-                    '<br><br>Replace them? Each one goes to the recycle bin first.',
-                    { danger: true, confirmLabel: 'Replace them' });
+            let result;
+            try {
+                result = await window.go.main.App.UploadBatch(this.currentPath, items, false, true);
+            } catch (err) {
+                sending.dismiss();
+                await this.say('Upload failed', String(err));
+                return;
+            }
+            sending.dismiss();
 
-                if (ok) {
-                    for (const c of clashes) {
-                        try {
-                            await window.go.main.App.UploadFileSafe(c.target, c.bytes, true);
-                            done++;
-                        } catch (err) {
-                            failed.push(c.entry.relPath + ' — ' + err);
-                        }
+            let done = result.uploaded.length;
+            failed.push(...(result.failed || []));
+
+            if (result.conflicts && result.conflicts.length) {
+                const answer = await window.Shell.dialog.form(
+                    result.conflicts.length + ' already there',
+                    [{
+                        name: 'keep', type: 'checkbox', value: true,
+                        label: 'Keep a copy of what I am replacing',
+                        hint: 'Each copy is a full download of the old file before the new one goes up. ' +
+                              'Turning this off is noticeably faster and makes the replacements unrecoverable.'
+                    }],
+                    {
+                        confirmLabel: 'Replace them',
+                        danger: true,
+                        intro: '<p class="form-hint" style="margin-bottom:12px">' +
+                            result.conflicts.slice(0, 8).map(c => '<span class="mono">' + this.escapeHtml(c) + '</span>').join('<br>') +
+                            (result.conflicts.length > 8 ? '<br>…and ' + (result.conflicts.length - 8) + ' more' : '') +
+                            '</p>'
+                    });
+
+                if (answer) {
+                    const again = items.filter(i => result.conflicts.some(c => c.endsWith('/' + i.rel_path) || c.endsWith(i.rel_path)));
+                    const retry = window.UX.toast.show('Replacing ' + again.length + ' file(s)…', { duration: 600000 });
+                    try {
+                        const second = await window.go.main.App.UploadBatch(this.currentPath, again, true, !!answer.keep);
+                        done += second.replaced.length + second.uploaded.length;
+                        failed.push(...(second.failed || []));
+                    } catch (err) {
+                        failed.push('replacing: ' + err);
                     }
+                    retry.dismiss();
                 }
             }
 
@@ -1531,44 +1690,11 @@ function initApp() {
             });
         },
         
+        // The Upload button and a drop from the desktop are the same thing
+        // once the files are in hand.
         async handleFileUpload(files) {
-            for (const file of files) {
-                const path = this.currentPath === '/'
-                    ? '/' + file.name
-                    : this.currentPath + '/' + file.name;
-
-                let bytes;
-                try {
-                    bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-                } catch (err) {
-                    await this.say('Could not read ' + file.name, String(err));
-                    continue;
-                }
-
-                try {
-                    // overwrite is false, so an upload that would land on an
-                    // existing name is refused rather than performed.
-                    await window.go.main.App.UploadFileSafe(path, bytes, false);
-                    console.log('Uploaded:', file.name);
-                } catch (err) {
-                    const message = String(err);
-                    if (message.indexOf('already exists') === -1) {
-                        await this.say('Failed to upload ' + file.name, message);
-                        continue;
-                    }
-                    const ok = await this.ask('Replace ' + this.escapeHtml(file.name) + '?',
-                        'A file with that name is already in <span class="mono">' + this.escapeHtml(this.currentPath) + '</span>. ' +
-                        'Replacing it puts the current file in the local recycle bin first.',
-                        { danger: true, confirmLabel: 'Replace' });
-                    if (!ok) continue;
-                    try {
-                        await window.go.main.App.UploadFileSafe(path, bytes, true);
-                    } catch (err2) {
-                        await this.say('Failed to upload ' + file.name, String(err2));
-                    }
-                }
-            }
-            await this.refreshFiles();
+            const entries = Array.from(files || []).map(file => ({ file: file, relPath: file.name }));
+            await this.uploadDrop(entries, false);
         },
         
         async newFolder() {
@@ -2612,6 +2738,49 @@ function initApp() {
             }
         },
         
+        /**
+         * Short relative age: minutes and hours for today, days for the last
+         * fortnight, a date after that. A file list is scanned, not read, so
+         * the useful form is the one that fits in eight characters.
+         */
+        formatWhen(value) {
+            if (!value) return '';
+            const then = new Date(value);
+            if (isNaN(then.getTime())) return '';
+
+            const secs = (Date.now() - then.getTime()) / 1000;
+            if (secs < 90) return 'now';
+            if (secs < 3600) return Math.round(secs / 60) + 'm';
+            if (secs < 86400) return Math.round(secs / 3600) + 'h';
+            if (secs < 14 * 86400) return Math.round(secs / 86400) + 'd';
+
+            const sameYear = then.getFullYear() === new Date().getFullYear();
+            return then.toLocaleDateString(undefined,
+                sameYear ? { day: 'numeric', month: 'short' } : { year: '2-digit', month: 'short' });
+        },
+
+        formatWhenFull(value) {
+            if (!value) return '';
+            const then = new Date(value);
+            return isNaN(then.getTime()) ? '' : then.toLocaleString();
+        },
+
+        /** Adds the permission column. */
+        toggleFileDetails() {
+            const tree = document.getElementById('fileTree');
+            if (!tree) return;
+            const on = tree.classList.toggle('details');
+            try { localStorage.setItem('fileDetails', on ? '1' : '0'); } catch (err) { /* private mode */ }
+            window.UX.toast.show(on ? 'Showing permissions' : 'Permissions hidden', { duration: 1200 });
+        },
+
+        restoreFileDetails() {
+            let on = false;
+            try { on = localStorage.getItem('fileDetails') === '1'; } catch (err) { /* private mode */ }
+            const tree = document.getElementById('fileTree');
+            if (tree && on) tree.classList.add('details');
+        },
+
         // Utilities
         formatSize(bytes) {
             if (bytes === 0) return '0 B';
@@ -2621,10 +2790,15 @@ function initApp() {
             return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
         },
         
+        // Quotes included: this goes into attributes as often as into text,
+        // and textContent -> innerHTML leaves them alone.
         escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            return String(text == null ? '' : text)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
     };
     

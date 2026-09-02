@@ -211,12 +211,16 @@
         }
         (files || []).forEach((f) => {
             const isDir = !!f.isDir;
+            const when = window.app ? window.app.formatWhen(f.modTime) : '';
+            const whenFull = window.app ? window.app.formatWhenFull(f.modTime) : '';
             html += '<div class="file-item" draggable="' + (isDir ? 'false' : 'true') + '" ' +
                 'data-name="' + esc(f.name) + '" data-dir="' + (isDir ? '1' : '') + '">' +
                 '<span class="file-icon kind-' + window.Icons.kindFor(f.name, isDir) + '">' +
                 window.Icons.forFile(f.name, isDir) + '</span>' +
-                '<span class="file-name">' + esc(f.name) + '</span>' +
-                '<span class="file-size">' + (isDir ? '' : window.Shell.fmt.bytes(f.size)) + '</span></div>';
+                '<span class="file-name" title="' + esc(f.name) + '">' + esc(f.name) + '</span>' +
+                '<span class="file-size">' + (isDir ? '' : window.Shell.fmt.bytes(f.size)) + '</span>' +
+                '<span class="file-date" title="' + esc(whenFull) + '">' + esc(when) + '</span>' +
+                '<span class="file-mode">' + esc(f.mode || '') + '</span></div>';
         });
 
         list.innerHTML = html || '<div class="preview-empty">Empty folder</div>';

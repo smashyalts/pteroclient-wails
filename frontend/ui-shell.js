@@ -37,10 +37,21 @@
         return m + 'm';
     }
 
+    /**
+     * Safe in an attribute as well as in text.
+     *
+     * The textContent -> innerHTML trick escapes & < > and leaves quotes
+     * alone, which is fine for text and wrong for the attributes most of this
+     * app interpolates into — one double quote in a value and the rest of it
+     * becomes markup.
+     */
     function escapeHtml(value) {
-        const div = document.createElement('div');
-        div.textContent = value == null ? '' : String(value);
-        return div.innerHTML;
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 
     /* ------------------------------------------------------------ dialogs */
@@ -276,6 +287,7 @@
             filesNewFileBtn: 'filePlus',
             filesDeleteBtn: 'trash',
             filesDownloadBtn: 'download',
+            filesDetailsBtn: 'log',
             filesDockBtn: 'layout',
             splitViewBtn: 'split',
             refreshServersBtn: 'refresh',

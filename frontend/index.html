@@ -153,6 +153,7 @@
                 <button onclick="window.app.downloadSelected()" type="button" class="icon-only" title="Download to this computer" id="filesDownloadBtn"></button>
                 <button onclick="window.app.deleteSelected()" class="danger icon-only" title="Delete selected (Del)" type="button" id="filesDeleteBtn"></button>
                 <div class="header-divider"></div>
+                <button onclick="window.app.toggleFileDetails()" type="button" class="icon-only" title="Show permissions" id="filesDetailsBtn"></button>
                 <button onclick="window.app.cycleTreeDock()" type="button" class="icon-only" title="Move the file tree (Ctrl+Shift+B)" id="filesDockBtn"></button>
                 <button id="splitViewBtn" type="button" title="Toggle split view (Ctrl+\)">Split view</button>
             </div>
@@ -161,7 +162,7 @@
                 <div class="file-pane">
                     <div class="filter-bar">
                         <input type="text" id="fileFilter" autocomplete="off" spellcheck="false"
-                               placeholder="Filter this folder…  (Ctrl+F)">
+                               placeholder="Filter this folder…  Enter searches everything below">
                         <span class="filter-count" id="fileFilterCount" hidden></span>
                         <button class="filter-clear" id="fileFilterClear" type="button" hidden aria-label="Clear">&times;</button>
                     </div>
