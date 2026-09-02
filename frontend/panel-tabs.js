@@ -95,26 +95,73 @@
         return [cron.minute, cron.hour, cron.day_of_month, cron.month, cron.day_of_week].join(' ');
     }
 
+    // What a task does, in the panel's own words.
+    function taskSummary(task) {
+        const payload = String(task.payload || '');
+        if (task.action === 'power') return 'Power: ' + esc(payload || 'start');
+        if (task.action === 'backup') {
+            return 'Create a backup' + (payload ? ' (ignoring ' + esc(payload.split('\n').length) + ' pattern(s))' : '');
+        }
+        return '<span class="mono">' + esc(payload) + '</span>';
+    }
+
+    function taskRows(schedule) {
+        const tasks = (schedule.relationships && schedule.relationships.tasks &&
+            schedule.relationships.tasks.data) || schedule.tasks || [];
+
+        const list = tasks.map((entry) => entry.attributes || entry);
+        list.sort((a, b) => (a.sequence_id || 0) - (b.sequence_id || 0));
+
+        if (!list.length) {
+            return '<div class="task-empty">No tasks yet — this schedule fires and does nothing. ' +
+                '<button class="sm" data-task-new="' + esc(schedule.id) + '" type="button">Add the first one</button></div>';
+        }
+
+        return '<div class="task-list">' + list.map((t) => (
+            '<div class="task-row">' +
+            '<span class="task-offset mono" title="Seconds after the previous task">+' + (t.time_offset || 0) + 's</span>' +
+            '<span class="task-body">' + taskSummary(t) +
+            (t.continue_on_failure ? ' <span class="tag muted">continues on failure</span>' : '') + '</span>' +
+            '<span class="list-actions">' +
+            '<button class="sm" data-task-edit="' + esc(t.id) + '" data-schedule="' + esc(schedule.id) + '" ' +
+            'data-action="' + esc(t.action) + '" data-payload="' + esc(t.payload || '') + '" ' +
+            'data-offset="' + (t.time_offset || 0) + '" data-continue="' + (t.continue_on_failure ? '1' : '0') + '" ' +
+            'type="button">Edit</button>' +
+            '<button class="sm danger" data-task-delete="' + esc(t.id) + '" data-schedule="' + esc(schedule.id) + '" ' +
+            'type="button">Remove</button>' +
+            '</span></div>'
+        )).join('') +
+            '<div class="task-add"><button class="sm" data-task-new="' + esc(schedule.id) + '" type="button">Add a task</button></div>' +
+            '</div>';
+    }
+
     const loadSchedules = pane('schedulesBody', async (target, api) => {
         const items = await api.ListSchedules();
         if (!items || !items.length) {
-            return empty(target, 'No schedules', 'Schedules run tasks on a cron — a nightly restart, a backup before a wipe. Create them in the panel; run and pause them here.', 'clock');
+            return empty(target, 'No schedules', 'A schedule runs tasks on a cron — a nightly restart, a backup before a wipe. Create one with the button above.', 'clock');
         }
 
-        target.innerHTML = rows(items.map((s) => {
+        target.innerHTML = items.map((s) => {
             const cron = s.cron || {};
             const state = s.is_processing ? '<span class="tag warn">Running</span>'
                 : s.is_active ? '<span class="tag ok">Active</span>'
                     : '<span class="tag muted">Paused</span>';
-            return '<div class="list-row">' +
+            return '<div class="card" style="margin-bottom:10px">' +
+                '<div class="list-row">' +
                 '<span class="list-badge' + (s.is_active ? ' on' : '') + '">' + icon('clock', 'ic-14') + '</span>' +
                 '<span class="list-main">' +
                 '<span class="list-title">' + esc(s.name) + ' ' + state + '</span>' +
-                '<span class="list-sub">' + esc(cronText(cron)) + (s.only_when_online ? ' · only when online' : '') + '</span>' +
+                '<span class="list-sub mono">' + esc(cronText(cron)) + (s.only_when_online ? ' · only when online' : '') + '</span>' +
                 '</span>' +
                 '<span class="list-meta"><span>last ' + esc(when(s.last_run_at)) + '</span><span>next ' + esc(when(s.next_run_at)) + '</span></span>' +
                 '<span class="list-actions">' +
                 '<button class="sm" data-sc-run="' + esc(s.id) + '" type="button">Run now</button>' +
+                '<button class="sm" data-sc-edit="' + esc(s.id) + '" ' +
+                'data-name="' + esc(s.name) + '" data-active="' + (s.is_active ? '1' : '0') + '" ' +
+                'data-online="' + (s.only_when_online ? '1' : '0') + '" ' +
+                'data-minute="' + esc(cron.minute) + '" data-hour="' + esc(cron.hour) + '" ' +
+                'data-dom="' + esc(cron.day_of_month) + '" data-month="' + esc(cron.month) + '" ' +
+                'data-dow="' + esc(cron.day_of_week) + '" type="button">Edit</button>' +
                 '<button class="sm" data-sc-toggle="' + esc(s.id) + '" ' +
                 'data-name="' + esc(s.name) + '" data-active="' + (s.is_active ? '1' : '0') + '" ' +
                 'data-online="' + (s.only_when_online ? '1' : '0') + '" ' +
@@ -122,8 +169,10 @@
                 'data-dom="' + esc(cron.day_of_month) + '" data-month="' + esc(cron.month) + '" ' +
                 'data-dow="' + esc(cron.day_of_week) + '" type="button">' + (s.is_active ? 'Pause' : 'Resume') + '</button>' +
                 '<button class="sm danger" data-sc-delete="' + esc(s.id) + '" data-name="' + esc(s.name) + '" type="button">Delete</button>' +
-                '</span></div>';
-        }));
+                '</span></div>' +
+                taskRows(s) +
+                '</div>';
+        }).join('');
     });
 
     /* ------------------------------------------------------------- users */
@@ -131,20 +180,27 @@
     const loadUsers = pane('usersBody', async (target, api) => {
         const items = await api.ListSubusers();
         if (!items || !items.length) {
-            return empty(target, 'No subusers', 'Subusers get scoped access to this one server. The owner is not listed here.', 'users');
+            return empty(target, 'No subusers', 'A subuser gets scoped access to this one server — you choose exactly which parts. The owner is not listed here.', 'users');
         }
 
         target.innerHTML = rows(items.map((u) => {
-            const perms = Array.isArray(u.permissions) ? u.permissions.length : 0;
+            const perms = Array.isArray(u.permissions) ? u.permissions : [];
+            // Which areas they can reach, rather than a number that says
+            // nothing. "file, backup" is the useful part of "7 permissions".
+            const areas = Array.from(new Set(perms.map((p) => String(p).split('.')[0]))).sort();
             return '<div class="list-row">' +
                 '<span class="list-badge on">' + icon('users', 'ic-14') + '</span>' +
                 '<span class="list-main">' +
                 '<span class="list-title">' + esc(u.username || u.email) +
                 (u['2fa_enabled'] ? ' <span class="tag ok">2FA</span>' : '') + '</span>' +
-                '<span class="list-sub">' + esc(u.email) + '</span>' +
+                '<span class="list-sub">' + esc(u.email) +
+                (areas.length ? ' · ' + esc(areas.join(', ')) : ' · no permissions') + '</span>' +
                 '</span>' +
-                '<span class="list-meta"><span>' + perms + ' permissions</span><span>' + esc(when(u.created_at)) + '</span></span>' +
+                '<span class="list-meta"><span>' + perms.length + ' permission' + (perms.length === 1 ? '' : 's') +
+                '</span><span>' + esc(when(u.created_at)) + '</span></span>' +
                 '<span class="list-actions">' +
+                '<button class="sm" data-user-edit="' + esc(u.uuid) + '" data-name="' + esc(u.username || u.email) + '" ' +
+                'data-perms="' + esc(perms.join(' ')) + '" type="button">Permissions</button>' +
                 '<button class="sm danger" data-user-delete="' + esc(u.uuid) + '" data-name="' + esc(u.username || u.email) + '" type="button">Revoke</button>' +
                 '</span></div>';
         }));
@@ -306,6 +362,79 @@
 
     /* ----------------------------------------------------------- actions */
 
+    /** The five cron fields plus the two switches, in one dialog. */
+    async function scheduleForm(title, current) {
+        const D = window.Shell.dialog;
+        const v = await D.form(title, [
+            { name: 'name', label: 'Name', value: current.name, placeholder: 'Nightly restart' },
+            { name: 'minute', label: 'Minute', value: current.minute, mono: true },
+            { name: 'hour', label: 'Hour', value: current.hour, mono: true },
+            { name: 'dom', label: 'Day of month', value: current.dom, mono: true },
+            { name: 'month', label: 'Month', value: current.month, mono: true },
+            { name: 'dow', label: 'Day of week', value: current.dow, mono: true,
+              hint: 'Standard cron. <span class="mono">0 4 * * *</span> is 04:00 daily; ' +
+                    '<span class="mono">*/15 * * * *</span> is every fifteen minutes.' },
+            { name: 'active', label: 'Active', type: 'checkbox', value: current.active },
+            { name: 'online', label: 'Only run while the server is online', type: 'checkbox', value: current.online }
+        ], { confirmLabel: 'Save' });
+
+        if (!v) return null;
+        if (!String(v.name || '').trim()) {
+            window.UX.toast.bad('A schedule needs a name');
+            return null;
+        }
+        return v;
+    }
+
+    /** Action first, then the fields that action actually needs. */
+    async function taskForm(title, current) {
+        const D = window.Shell.dialog;
+        const api = go();
+        const actions = await api.ScheduleTaskActions();
+
+        const action = await D.choose(title,
+            current.action ? 'Currently: <span class="mono">' + esc(current.action) + '</span>' : '',
+            actions.map((a) => ({ key: a.id, label: a.label, detail: a.hint })));
+        if (!action) return null;
+
+        const payloadField = action === 'command'
+            ? { name: 'payload', label: 'Command', value: current.action === 'command' ? current.payload : '',
+                mono: true, placeholder: 'say Restarting in 60 seconds' }
+            : action === 'power'
+                ? { name: 'payload', label: 'Signal', value: current.action === 'power' ? current.payload : 'restart',
+                    mono: true, hint: 'start, stop, restart or kill.' }
+                : { name: 'payload', label: 'Ignored paths', type: 'textarea',
+                    value: current.action === 'backup' ? current.payload : '', mono: true,
+                    placeholder: 'cache/\nlogs/', hint: 'One glob per line. Leave empty to back up everything.' };
+
+        const v = await D.form(actions.find((a) => a.id === action).label, [
+            payloadField,
+            { name: 'offset', label: 'Wait before running', value: String(current.offset || 0), mono: true,
+              hint: 'Seconds after the previous task in this schedule. The first task should be 0.' },
+            { name: 'cont', label: 'Carry on if this task fails', type: 'checkbox', value: !!current.cont }
+        ], { confirmLabel: 'Save task' });
+        if (!v) return null;
+
+        const offset = parseInt(v.offset, 10);
+        if (isNaN(offset) || offset < 0) {
+            window.UX.toast.bad('The wait has to be a number of seconds');
+            return null;
+        }
+        return { action: action, payload: String(v.payload || '').trim(), offset: offset, cont: !!v.cont };
+    }
+
+    async function addTask(scheduleID) {
+        const v = await taskForm('Add a task', { action: '', payload: '', offset: 0, cont: false });
+        if (!v) return;
+        try {
+            await go().CreateScheduleTask(scheduleID, v.action, v.payload, v.offset, v.cont);
+            reload('schedules');
+        } catch (err) {
+            window.Shell.dialog.confirm('Could not add the task',
+                esc(String(err && err.message ? err.message : err)), { confirmLabel: 'OK' });
+        }
+    }
+
     async function guard(fn, reloadName) {
         try {
             await fn();
@@ -341,6 +470,54 @@
         }
 
         /* schedules */
+        if (el.id === 'newScheduleBtn') {
+            const v = await scheduleForm('New schedule', {
+                name: '', minute: '0', hour: '*', dom: '*', month: '*', dow: '*',
+                active: true, online: false
+            });
+            if (!v) return;
+            return guard(async () => {
+                const made = await api.CreateSchedule(v.name, v.minute, v.hour, v.dom, v.month, v.dow,
+                    v.active, v.online);
+                window.UX.toast.ok('Created ' + v.name + ' — it has no tasks yet', {
+                    action: made && made.id ? { label: 'Add a task', run: () => addTask(String(made.id)) } : null
+                });
+            }, 'schedules');
+        }
+
+        if (el.dataset.scEdit) {
+            const d = el.dataset;
+            const v = await scheduleForm('Edit ' + d.name, {
+                name: d.name, minute: d.minute, hour: d.hour, dom: d.dom, month: d.month, dow: d.dow,
+                active: d.active === '1', online: d.online === '1'
+            });
+            if (!v) return;
+            return guard(() => api.UpdateSchedule(d.scEdit, v.name, v.minute, v.hour, v.dom, v.month, v.dow,
+                v.active, v.online), 'schedules');
+        }
+
+        /* schedule tasks */
+        if (el.dataset.taskNew) return addTask(el.dataset.taskNew);
+
+        if (el.dataset.taskEdit) {
+            const d = el.dataset;
+            const v = await taskForm('Edit task', {
+                action: d.action, payload: d.payload,
+                offset: d.offset, cont: d.continue === '1'
+            });
+            if (!v) return;
+            return guard(() => api.UpdateScheduleTask(d.schedule, d.taskEdit, v.action, v.payload,
+                v.offset, v.cont), 'schedules');
+        }
+
+        if (el.dataset.taskDelete) {
+            const ok = await D.confirm('Remove task',
+                'The schedule keeps running; it just stops doing this one thing.',
+                { danger: true, confirmLabel: 'Remove' });
+            if (ok) guard(() => api.DeleteScheduleTask(el.dataset.schedule, el.dataset.taskDelete), 'schedules');
+            return;
+        }
+
         if (el.dataset.scRun) return guard(() => api.ExecuteSchedule(el.dataset.scRun), 'schedules');
         if (el.dataset.scToggle) {
             const d = el.dataset;
@@ -356,6 +533,46 @@
         }
 
         /* users */
+        if (el.id === 'newSubuserBtn') {
+            const who = await D.form('Invite a subuser', [
+                { name: 'email', label: 'Email address', placeholder: 'someone@example.com', type: 'email',
+                  hint: 'They need an account on this panel already; the invite links this server to it.' }
+            ], { confirmLabel: 'Choose permissions' });
+            if (!who || !who.email) return;
+
+            const groups = await api.SubuserPermissions();
+            // Read-only across the board is the least surprising starting
+            // point: it is the set you can hand out without thinking.
+            const defaults = ['control.console', 'file.read', 'file.read-content'];
+            const perms = await D.checklist('Permissions for ' + esc(who.email), groups, defaults, {
+                confirmLabel: 'Invite',
+                intro: '<p class="form-hint" style="margin-bottom:12px">Everything is off unless you tick it. ' +
+                       'The header checkbox in each group toggles the whole group.</p>'
+            });
+            if (!perms) return;
+
+            return guard(async () => {
+                await api.CreateSubuser(who.email, perms);
+                window.UX.toast.ok('Invited ' + who.email + ' with ' + perms.length + ' permission(s)');
+            }, 'users');
+        }
+
+        if (el.dataset.userEdit) {
+            const groups = await api.SubuserPermissions();
+            const current = String(el.dataset.perms || '').split(' ').filter(Boolean);
+            const perms = await D.checklist('Permissions for ' + esc(el.dataset.name), groups, current, {
+                confirmLabel: 'Save',
+                intro: '<p class="form-hint" style="margin-bottom:12px">Unticking everything leaves them with ' +
+                       'access to nothing; revoke them instead if that is what you mean.</p>'
+            });
+            if (!perms) return;
+
+            return guard(async () => {
+                await api.UpdateSubuser(el.dataset.userEdit, perms);
+                window.UX.toast.ok(el.dataset.name + ' now has ' + perms.length + ' permission(s)');
+            }, 'users');
+        }
+
         if (el.dataset.userDelete) {
             const ok = await D.confirm('Revoke access', 'Remove <b>' + esc(el.dataset.name) + '</b> from this server?', { danger: true, confirmLabel: 'Revoke' });
             if (ok) guard(() => api.DeleteSubuser(el.dataset.userDelete), 'users');

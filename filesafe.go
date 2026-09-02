@@ -23,7 +23,10 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -1682,4 +1685,300 @@ func (a *App) CopyFileBetweenServers(srcServer, srcPath, dstServer, dstDir strin
 		return nil, err
 	}
 	return out, nil
+}
+
+/* ------------------------------------------------- download to the disk */
+
+// DownloadOutcome reports where files ended up on this machine.
+type DownloadOutcome struct {
+	Directory string   `json:"directory"`
+	Files     []string `json:"files"`
+	Skipped   []string `json:"skipped"`
+	Bytes     int64    `json:"bytes"`
+	Cancelled bool     `json:"cancelled"`
+}
+
+// MaxDownloadBytes caps one downloaded file. The content is read into memory
+// on the way through, so this is a memory ceiling rather than a policy.
+const MaxDownloadBytes int64 = 256 << 20
+
+// DownloadToDisk saves panel files onto this machine.
+//
+// One file gets a Save-as dialog; anything else asks for a folder and writes
+// into it. A directory in the selection is archived on the panel first and the
+// archive is what comes down — the client API serves files, not trees — and the
+// archive is removed afterwards, since the app made it rather than the user.
+func (a *App) DownloadToDisk(paths []string) (*DownloadOutcome, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("nothing selected")
+	}
+	if a.ctx == nil {
+		return nil, errors.New("no window to ask from")
+	}
+
+	cleaned := make([]string, 0, len(paths))
+	for _, p := range paths {
+		norm, err := normalizeRemotePath(p)
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err := splitRemote(norm); err != nil {
+			return nil, err
+		}
+		cleaned = append(cleaned, norm)
+	}
+
+	// Work out what each path is before asking where to put it, so the dialog
+	// is not shown for a selection that cannot be downloaded at all.
+	type item struct {
+		path      string
+		name      string
+		isDir     bool
+		size      int64
+		temporary bool // an archive this call created, to be removed after
+	}
+
+	items := make([]item, 0, len(cleaned))
+	outcome := &DownloadOutcome{Files: []string{}, Skipped: []string{}}
+
+	a.fileMu.Lock()
+	err := a.withServerClient("", func(c *pterodactyl.Client, _ string) error {
+		for _, p := range cleaned {
+			dir, name, _ := splitRemote(p)
+			files, listErr := c.ListFiles(dir)
+			if listErr != nil {
+				return fmt.Errorf("cannot list %s: %w", dir, listErr)
+			}
+			var found *pterodactyl.FileInfo
+			for i := range files {
+				if files[i].Name == name {
+					found = &files[i]
+					break
+				}
+			}
+			if found == nil {
+				return fmt.Errorf("%s no longer exists — refresh the file list", p)
+			}
+			items = append(items, item{
+				path:  p,
+				name:  name,
+				isDir: !found.IsFile && !found.IsSymlink,
+				size:  found.Size,
+			})
+		}
+		return nil
+	})
+	a.fileMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+
+	// Where to.
+	single := len(items) == 1 && !items[0].isDir
+	var targetDir, targetFile string
+
+	if single {
+		chosen, dlgErr := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+			Title:           "Save " + items[0].name,
+			DefaultFilename: items[0].name,
+		})
+		if dlgErr != nil {
+			return nil, dlgErr
+		}
+		if chosen == "" {
+			outcome.Cancelled = true
+			return outcome, nil
+		}
+		targetFile = chosen
+		targetDir = filepath.Dir(chosen)
+	} else {
+		chosen, dlgErr := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+			Title: "Save " + fmt.Sprintf("%d item(s)", len(items)) + " into…",
+		})
+		if dlgErr != nil {
+			return nil, dlgErr
+		}
+		if chosen == "" {
+			outcome.Cancelled = true
+			return outcome, nil
+		}
+		targetDir = chosen
+	}
+	outcome.Directory = targetDir
+
+	// Archive the folders, download everything, then clean up what we made.
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	err = a.withServerClient("", func(c *pterodactyl.Client, _ string) error {
+		for i := range items {
+			if !items[i].isDir {
+				continue
+			}
+			dir, name, _ := splitRemote(items[i].path)
+			attrs, compressErr := c.CompressFiles(dir, []string{name})
+			if compressErr != nil {
+				outcome.Skipped = append(outcome.Skipped, items[i].path+" — could not be archived: "+compressErr.Error())
+				items[i].name = ""
+				continue
+			}
+			archive, _ := attrs["name"].(string)
+			if archive == "" {
+				outcome.Skipped = append(outcome.Skipped, items[i].path+" — the panel did not name the archive")
+				items[i].name = ""
+				continue
+			}
+			items[i].path = joinRemote(dir, archive)
+			items[i].name = archive
+			items[i].temporary = true
+			if size, ok := attrs["size"].(float64); ok {
+				items[i].size = int64(size)
+			}
+		}
+
+		for _, it := range items {
+			if it.name == "" {
+				continue
+			}
+			if it.size > MaxDownloadBytes {
+				outcome.Skipped = append(outcome.Skipped,
+					it.path+" — "+humanBytes(it.size)+", over the "+humanBytes(MaxDownloadBytes)+" limit")
+				continue
+			}
+
+			content, readErr := c.GetFileContent(it.path)
+			if readErr != nil {
+				outcome.Skipped = append(outcome.Skipped, it.path+" — "+readErr.Error())
+				continue
+			}
+
+			dest := targetFile
+			if dest == "" {
+				dest = filepath.Join(targetDir, sanitizeLocalName(it.name))
+			}
+			if writeErr := os.WriteFile(dest, []byte(content), 0o644); writeErr != nil {
+				outcome.Skipped = append(outcome.Skipped, it.path+" — "+writeErr.Error())
+				continue
+			}
+
+			outcome.Files = append(outcome.Files, dest)
+			outcome.Bytes += int64(len(content))
+		}
+
+		// The archives were this call's doing, so this call takes them back.
+		for _, it := range items {
+			if !it.temporary || it.name == "" {
+				continue
+			}
+			dir, name, splitErr := splitRemote(it.path)
+			if splitErr != nil {
+				continue
+			}
+			if delErr := c.DeleteFiles(dir, []string{name}); delErr != nil {
+				outcome.Skipped = append(outcome.Skipped,
+					"left "+it.path+" on the server: "+delErr.Error())
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return outcome, nil
+}
+
+// sanitizeLocalName keeps a panel filename usable on a Windows filesystem.
+func sanitizeLocalName(name string) string {
+	out := strings.Map(func(r rune) rune {
+		switch {
+		case r < 0x20, r == 0x7f:
+			return '_'
+		case strings.ContainsRune(`<>:"/\|?*`, r):
+			return '_'
+		}
+		return r
+	}, name)
+	out = strings.Trim(out, " .")
+	if out == "" {
+		out = "download"
+	}
+	return out
+}
+
+/* ---------------------------------------------------- console window */
+
+// WindowMode tells the frontend which of the two shapes this process is.
+// "console" hides everything that is not the console; "main" is the whole app.
+func (a *App) WindowMode() map[string]interface{} {
+	return map[string]interface{}{
+		"mode":     map[bool]string{true: "console", false: "main"}[a.consoleOnly],
+		"serverID": a.consoleServerID,
+		"panel":    a.consolePanelName,
+	}
+}
+
+// OpenConsoleWindow launches a second copy of this binary as a console-only
+// window for one server.
+//
+// Wails v2 runs a single window per process, so a console that can be dragged
+// to another monitor and resized past the main window's bounds has to be its
+// own process. It reads the same config and opens its own websocket, which the
+// panel is happy to serve alongside the first.
+func (a *App) OpenConsoleWindow(serverID string) error {
+	if a.consoleOnly {
+		return errors.New("this is already a console window")
+	}
+
+	if serverID == "" {
+		serverID = a.activeServerID()
+	}
+	if serverID == "" {
+		return errors.New("no server selected")
+	}
+
+	panelName := a.serverPanelMap[serverID]
+	if panelName == "" {
+		panelName = a.config.GetActivePanelName()
+	}
+
+	label := serverID
+	for _, s := range a.lastKnownServers() {
+		if s.ID == serverID && s.Name != "" {
+			label = s.Name
+			break
+		}
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("cannot find this application on disk: %w", err)
+	}
+
+	cmd := exec.Command(exe, "--console", serverID, "--panel", panelName, "--label", label)
+	cmd.Dir = filepath.Dir(exe)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("could not open the console window: %w", err)
+	}
+
+	// Nothing waits on it: it is a sibling window, not a subtask, and it
+	// outlives whatever the main window does next.
+	go func() { _ = cmd.Wait() }()
+
+	if a.ctx != nil {
+		runtime.LogInfof(a.ctx, "opened a console window for %s (%s)", label, serverID)
+	}
+	return nil
+}
+
+// lastKnownServers reads the active panel's server list for a display name,
+// falling back to nothing rather than failing the launch over a label.
+func (a *App) lastKnownServers() []pterodactyl.ServerInfo {
+	if a.client == nil {
+		return nil
+	}
+	servers, err := a.client.ListServers()
+	if err != nil {
+		return nil
+	}
+	return servers
 }

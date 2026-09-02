@@ -105,6 +105,7 @@
             <div class="console-toolbar">
                 <button onclick="window.app.connectConsole()" id="connectBtn" type="button">Connect</button>
                 <button onclick="window.app.loadServerLog()" type="button" title="Read the server's log file — the websocket only replays what wings still has buffered">Load log</button>
+                <button onclick="window.app.popOutConsole()" id="consolePopBtn" type="button" title="Open this console in its own window">Pop out</button>
                 <button onclick="window.app.clearConsole()" type="button">Clear</button>
                 <div class="power-controls">
                     <span class="eyebrow" style="margin-right: 4px;">Power</span>
@@ -140,6 +141,7 @@
                     <span class="selection-count" id="selectionCount"></span>
                     <button onclick="window.app.archiveSelected()" type="button" class="sm" title="Archive selected (Ctrl+Shift+A)">Archive</button>
                     <button onclick="window.app.extractSelected()" type="button" class="sm" title="Extract archive (Ctrl+Shift+E)">Extract</button>
+                    <button onclick="window.app.downloadSelected()" type="button" class="sm" title="Download to this computer">Download</button>
                     <button onclick="window.app.clearSelection()" type="button" class="sm" title="Clear selection (Esc)">Clear</button>
                 </div>
 
@@ -148,6 +150,7 @@
                 <button onclick="window.app.uploadFile()" type="button" id="filesUploadBtn" title="Upload (Ctrl+U)">Upload</button>
                 <button onclick="window.app.newFolder()" type="button" class="icon-only" title="New folder (Ctrl+Shift+N)" id="filesNewFolderBtn"></button>
                 <button onclick="window.app.newFile()" type="button" class="icon-only" title="New file (Ctrl+N)" id="filesNewFileBtn"></button>
+                <button onclick="window.app.downloadSelected()" type="button" class="icon-only" title="Download to this computer" id="filesDownloadBtn"></button>
                 <button onclick="window.app.deleteSelected()" class="danger icon-only" title="Delete selected (Del)" type="button" id="filesDeleteBtn"></button>
                 <div class="header-divider"></div>
                 <button onclick="window.app.cycleTreeDock()" type="button" class="icon-only" title="Move the file tree (Ctrl+Shift+B)" id="filesDockBtn"></button>
@@ -155,8 +158,16 @@
             </div>
 
             <div class="file-manager">
-                <div class="file-tree" id="fileTree">
-                    <div class="loading">Loading files…</div>
+                <div class="file-pane">
+                    <div class="filter-bar">
+                        <input type="text" id="fileFilter" autocomplete="off" spellcheck="false"
+                               placeholder="Filter this folder…  (Ctrl+F)">
+                        <span class="filter-count" id="fileFilterCount" hidden></span>
+                        <button class="filter-clear" id="fileFilterClear" type="button" hidden aria-label="Clear">&times;</button>
+                    </div>
+                    <div class="file-tree" id="fileTree">
+                        <div class="loading">Loading files…</div>
+                    </div>
                 </div>
 
                 <div class="editor-container">
@@ -205,6 +216,7 @@
                 <span class="toolbar-title">Schedules</span>
                 <div class="spacer"></div>
                 <button data-reload="schedules" type="button">Refresh</button>
+                <button class="primary" id="newScheduleBtn" type="button">New schedule</button>
             </div>
             <div class="pane" id="schedulesBody"></div>
         </div>
@@ -215,6 +227,7 @@
                 <span class="toolbar-title">Users</span>
                 <div class="spacer"></div>
                 <button data-reload="users" type="button">Refresh</button>
+                <button class="primary" id="newSubuserBtn" type="button">Invite subuser</button>
             </div>
             <div class="pane" id="usersBody"></div>
         </div>
@@ -394,5 +407,6 @@
 <script src="./vault.js"></script>
 <script src="./commands.js"></script>
 <script src="./session.js"></script>
+<script src="./console-mode.js"></script>
 </body>
 </html>

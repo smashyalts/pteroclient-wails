@@ -30,6 +30,12 @@ type App struct {
 	fileMu      sync.Mutex
 	planMu      sync.Mutex
 	deletePlans map[string]*DeletePlan
+
+	// Set when this process was launched as a console window rather than the
+	// main app. See main.go and OpenConsoleWindow.
+	consoleOnly      bool
+	consoleServerID  string
+	consolePanelName string
 }
 
 // NewApp creates a new App application struct
@@ -64,11 +70,22 @@ func (a *App) startup(ctx context.Context) {
 		return
 	}
 	
+	// A console window was told which panel and server it is for; switching
+	// before the first connect saves it connecting twice.
+	if a.consoleOnly && a.consolePanelName != "" {
+		_ = a.config.SetActivePanel(a.consolePanelName)
+	}
+
 	// Connect if we have an active configured panel
 	if a.config.IsConfigured() {
 		a.Connect()
 		// Initialize server mappings for all panels
 		a.RefreshAllServerMappings()
+
+		if a.consoleOnly && a.consoleServerID != "" && a.client != nil {
+			a.client.SetServerID(a.consoleServerID)
+			_ = a.config.UpdateActivePanelServer(a.consoleServerID)
+		}
 	}
 }
 

@@ -96,6 +96,49 @@
         },
 
         /**
+         * Checklist. `groups` is [{group,hint,permissions:[{key,label}]}] and
+         * `selected` the keys already on. Resolves an array of keys, or null.
+         *
+         * Built for the subuser permission set, which is fifty-odd keys in
+         * nine groups — a form with fifty text fields was never going to be
+         * the way to ask for that.
+         */
+        checklist(title, groups, selected, opts) {
+            const o = opts || {};
+            const on = new Set(selected || []);
+
+            const body = (o.intro || '') + '<div class="checklist">' + groups.map((g) => (
+                '<div class="checklist-group">' +
+                '<div class="checklist-head">' +
+                '<label class="check"><input type="checkbox" data-group-all="' + escapeHtml(g.group) + '">' +
+                '<span class="eyebrow">' + escapeHtml(g.group) + '</span></label>' +
+                (g.hint ? '<span class="checklist-hint">' + escapeHtml(g.hint) + '</span>' : '') +
+                '</div>' +
+                '<div class="checklist-items" data-group="' + escapeHtml(g.group) + '">' +
+                g.permissions.map((perm) => (
+                    '<label class="check"><input type="checkbox" data-perm="' + escapeHtml(perm.key) + '"' +
+                    (on.has(perm.key) ? ' checked' : '') + '>' +
+                    '<span>' + escapeHtml(perm.label) + '</span>' +
+                    '<span class="check-key mono">' + escapeHtml(perm.key) + '</span></label>'
+                )).join('') +
+                '</div></div>'
+            )).join('') + '</div>';
+
+            return Dialog.open({
+                title: title,
+                body: body,
+                confirmLabel: o.confirmLabel || 'Save'
+            }).then((ok) => {
+                if (!ok) return null;
+                const out = [];
+                document.querySelectorAll('#appDialogBody [data-perm]:checked').forEach((el) => {
+                    out.push(el.getAttribute('data-perm'));
+                });
+                return out;
+            });
+        },
+
+        /**
          * Multiple-choice. `choices` is [{key,label,detail,danger,primary}].
          * Resolves the chosen key, or null when cancelled.
          */
@@ -135,17 +178,36 @@
          *  Resolves an object of values, or null when cancelled. */
         form(title, fields, opts) {
             const o = opts || {};
-            const body = (o.intro || '') + fields.map((f) => (
-                '<div class="form-group">' +
-                '<label>' + escapeHtml(f.label) + '</label>' +
-                '<input type="' + (f.type || 'text') + '" ' +
-                'class="' + (f.mono ? 'mono' : '') + '" ' +
-                'data-field="' + escapeHtml(f.name) + '" ' +
-                'value="' + escapeHtml(f.value || '') + '" ' +
-                'placeholder="' + escapeHtml(f.placeholder || '') + '">' +
-                (f.hint ? '<div style="margin-top:6px;font-size:11.5px;color:var(--text-faint)">' + f.hint + '</div>' : '') +
-                '</div>'
-            )).join('');
+            const body = (o.intro || '') + fields.map((f) => {
+                // A yes/no answer typed into a text box is a worse question
+                // than a checkbox, and tasks need two of them.
+                if (f.type === 'checkbox') {
+                    return '<div class="form-group">' +
+                        '<label class="check"><input type="checkbox" data-field="' + escapeHtml(f.name) + '"' +
+                        (f.value ? ' checked' : '') + '><span>' + escapeHtml(f.label) + '</span></label>' +
+                        (f.hint ? '<div class="form-hint">' + f.hint + '</div>' : '') +
+                        '</div>';
+                }
+                if (f.type === 'textarea') {
+                    return '<div class="form-group">' +
+                        '<label>' + escapeHtml(f.label) + '</label>' +
+                        '<textarea rows="' + (f.rows || 4) + '" class="' + (f.mono ? 'mono' : '') + '" ' +
+                        'data-field="' + escapeHtml(f.name) + '" ' +
+                        'placeholder="' + escapeHtml(f.placeholder || '') + '">' +
+                        escapeHtml(f.value || '') + '</textarea>' +
+                        (f.hint ? '<div class="form-hint">' + f.hint + '</div>' : '') +
+                        '</div>';
+                }
+                return '<div class="form-group">' +
+                    '<label>' + escapeHtml(f.label) + '</label>' +
+                    '<input type="' + (f.type || 'text') + '" ' +
+                    'class="' + (f.mono ? 'mono' : '') + '" ' +
+                    'data-field="' + escapeHtml(f.name) + '" ' +
+                    'value="' + escapeHtml(f.value || '') + '" ' +
+                    'placeholder="' + escapeHtml(f.placeholder || '') + '">' +
+                    (f.hint ? '<div class="form-hint">' + f.hint + '</div>' : '') +
+                    '</div>';
+            }).join('');
 
             return Dialog.open({
                 title: title,
@@ -156,7 +218,7 @@
                 if (!ok) return null;
                 const out = {};
                 document.querySelectorAll('#appDialogBody [data-field]').forEach((el) => {
-                    out[el.getAttribute('data-field')] = el.value;
+                    out[el.getAttribute('data-field')] = el.type === 'checkbox' ? el.checked : el.value;
                 });
                 return out;
             });
@@ -173,6 +235,15 @@
         modal.addEventListener('click', (e) => {
             const choice = e.target.closest('[data-choice]');
             if (choice) Dialog.close(choice.getAttribute('data-choice'));
+        });
+
+        modal.addEventListener('change', (e) => {
+            const all = e.target.closest('[data-group-all]');
+            if (!all) return;
+            const group = all.getAttribute('data-group-all');
+            const scope = modal.querySelector('[data-group="' + CSS.escape(group) + '"]');
+            if (!scope) return;
+            scope.querySelectorAll('[data-perm]').forEach((box) => { box.checked = all.checked; });
         });
         modal.addEventListener('click', (e) => {
             if (e.target === modal) Dialog.close(null);
@@ -204,6 +275,7 @@
             filesNewFolderBtn: 'folderPlus',
             filesNewFileBtn: 'filePlus',
             filesDeleteBtn: 'trash',
+            filesDownloadBtn: 'download',
             filesDockBtn: 'layout',
             splitViewBtn: 'split',
             refreshServersBtn: 'refresh',

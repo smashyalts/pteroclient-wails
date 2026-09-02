@@ -347,3 +347,189 @@ func (a *App) ListAllServers() ([]ServerRef, error) {
 	}
 	return refs, nil
 }
+
+// ------------------------------------------------- schedules: full editing
+
+func (a *App) GetSchedule(scheduleID string) (map[string]interface{}, error) {
+	if err := a.requireClient(); err != nil {
+		return nil, err
+	}
+	attrs, err := a.client.GetSchedule(scheduleID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}(attrs), nil
+}
+
+func (a *App) CreateSchedule(name, minute, hour, dayOfMonth, month, dayOfWeek string, isActive, onlyWhenOnline bool) (map[string]interface{}, error) {
+	if err := a.requireClient(); err != nil {
+		return nil, err
+	}
+	attrs, err := a.client.CreateSchedule(name, cronFields(minute, hour, dayOfMonth, month, dayOfWeek), isActive, onlyWhenOnline)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}(attrs), nil
+}
+
+func (a *App) UpdateSchedule(scheduleID, name, minute, hour, dayOfMonth, month, dayOfWeek string, isActive, onlyWhenOnline bool) (map[string]interface{}, error) {
+	if err := a.requireClient(); err != nil {
+		return nil, err
+	}
+	attrs, err := a.client.UpdateSchedule(scheduleID, name, cronFields(minute, hour, dayOfMonth, month, dayOfWeek), isActive, onlyWhenOnline)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}(attrs), nil
+}
+
+// ScheduleTaskActions is what the panel accepts, handed to the UI so the
+// picker and the validation here cannot drift apart.
+func (a *App) ScheduleTaskActions() []map[string]string {
+	return []map[string]string{
+		{"id": "command", "label": "Send a console command", "hint": "The command, without a leading slash."},
+		{"id": "power", "label": "Power action", "hint": "One of start, stop, restart or kill."},
+		{"id": "backup", "label": "Create a backup", "hint": "Optional ignore list, one glob per line."},
+	}
+}
+
+func (a *App) CreateScheduleTask(scheduleID, action, payload string, timeOffset int, continueOnFailure bool) (map[string]interface{}, error) {
+	if err := a.requireClient(); err != nil {
+		return nil, err
+	}
+	if err := validateTask(action, payload); err != nil {
+		return nil, err
+	}
+	attrs, err := a.client.CreateScheduleTask(scheduleID, action, payload, timeOffset, continueOnFailure)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}(attrs), nil
+}
+
+func (a *App) UpdateScheduleTask(scheduleID, taskID, action, payload string, timeOffset int, continueOnFailure bool) (map[string]interface{}, error) {
+	if err := a.requireClient(); err != nil {
+		return nil, err
+	}
+	if err := validateTask(action, payload); err != nil {
+		return nil, err
+	}
+	attrs, err := a.client.UpdateScheduleTask(scheduleID, taskID, action, payload, timeOffset, continueOnFailure)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}(attrs), nil
+}
+
+func (a *App) DeleteScheduleTask(scheduleID, taskID string) error {
+	if err := a.requireClient(); err != nil {
+		return err
+	}
+	return a.client.DeleteScheduleTask(scheduleID, taskID)
+}
+
+func cronFields(minute, hour, dayOfMonth, month, dayOfWeek string) map[string]string {
+	return map[string]string{
+		"minute":       minute,
+		"hour":         hour,
+		"day_of_month": dayOfMonth,
+		"month":        month,
+		"day_of_week":  dayOfWeek,
+	}
+}
+
+// validateTask catches the two mistakes the panel reports as an opaque 422.
+func validateTask(action, payload string) error {
+	switch action {
+	case "command":
+		if strings.TrimSpace(payload) == "" {
+			return fmt.Errorf("a command task needs a command")
+		}
+	case "power":
+		switch strings.TrimSpace(payload) {
+		case "start", "stop", "restart", "kill":
+		default:
+			return fmt.Errorf("a power task takes start, stop, restart or kill, not %q", payload)
+		}
+	case "backup":
+		// An empty ignore list is normal.
+	default:
+		return fmt.Errorf("unknown task action %q", action)
+	}
+	return nil
+}
+
+// ----------------------------------------------- subusers: full permissions
+
+// SubuserPermissions is the panel's permission set, grouped the way its own
+// UI groups them. Sent to the frontend so the picker cannot fall out of step
+// with what the API accepts.
+func (a *App) SubuserPermissions() []map[string]interface{} {
+	group := func(name, describe string, keys ...[2]string) map[string]interface{} {
+		items := make([]map[string]string, 0, len(keys))
+		for _, k := range keys {
+			items = append(items, map[string]string{"key": k[0], "label": k[1]})
+		}
+		return map[string]interface{}{"group": name, "hint": describe, "permissions": items}
+	}
+
+	return []map[string]interface{}{
+		group("Console", "Reading output and sending commands.",
+			[2]string{"control.console", "See the console"},
+			[2]string{"control.start", "Start the server"},
+			[2]string{"control.stop", "Stop the server"},
+			[2]string{"control.restart", "Restart the server"},
+		),
+		group("Files", "Everything in the file manager.",
+			[2]string{"file.read", "List files"},
+			[2]string{"file.read-content", "Read file contents"},
+			[2]string{"file.create", "Create files and folders"},
+			[2]string{"file.update", "Edit and rename"},
+			[2]string{"file.delete", "Delete"},
+			[2]string{"file.archive", "Archive and extract"},
+			[2]string{"file.sftp", "Connect over SFTP"},
+		),
+		group("Backups", "",
+			[2]string{"backup.read", "See backups"},
+			[2]string{"backup.create", "Create backups"},
+			[2]string{"backup.delete", "Delete backups"},
+			[2]string{"backup.download", "Download backups"},
+			[2]string{"backup.restore", "Restore backups"},
+		),
+		group("Databases", "",
+			[2]string{"database.read", "See databases"},
+			[2]string{"database.create", "Create databases"},
+			[2]string{"database.update", "Rotate passwords"},
+			[2]string{"database.delete", "Delete databases"},
+			[2]string{"database.view_password", "See passwords"},
+		),
+		group("Schedules", "",
+			[2]string{"schedule.read", "See schedules"},
+			[2]string{"schedule.create", "Create schedules"},
+			[2]string{"schedule.update", "Edit schedules"},
+			[2]string{"schedule.delete", "Delete schedules"},
+		),
+		group("Subusers", "Managing who else has access.",
+			[2]string{"user.read", "See subusers"},
+			[2]string{"user.create", "Invite subusers"},
+			[2]string{"user.update", "Change permissions"},
+			[2]string{"user.delete", "Remove subusers"},
+		),
+		group("Network", "",
+			[2]string{"allocation.read", "See allocations"},
+			[2]string{"allocation.create", "Add allocations"},
+			[2]string{"allocation.update", "Edit allocations"},
+			[2]string{"allocation.delete", "Remove allocations"},
+		),
+		group("Startup", "",
+			[2]string{"startup.read", "See startup variables"},
+			[2]string{"startup.update", "Change startup variables"},
+			[2]string{"startup.docker-image", "Change the Docker image"},
+		),
+		group("Settings", "",
+			[2]string{"settings.rename", "Rename the server"},
+			[2]string{"settings.reinstall", "Reinstall the server"},
+			[2]string{"activity.read", "See the activity log"},
+		),
+	}
+}

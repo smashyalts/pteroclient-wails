@@ -358,3 +358,73 @@ func (c *Client) ListActivity(page int) ([]Attributes, error) {
 	query.Set("sort", "-timestamp")
 	return c.getList(c.serverPath("/activity?%s", query.Encode()))
 }
+
+// ------------------------------------------------------- schedule tasks
+
+// GetSchedule returns one schedule with its task list. The list endpoint
+// includes tasks too, but after a task edit only this refetches the one
+// schedule instead of all of them.
+func (c *Client) GetSchedule(scheduleID string) (Attributes, error) {
+	return c.getObject(c.serverPath("/schedules/%s", scheduleID))
+}
+
+// CreateSchedule adds a schedule. cron carries the five fields the panel
+// expects; an empty field is rejected by the panel rather than defaulted here,
+// since a silently-widened cron is worse than an error.
+func (c *Client) CreateSchedule(name string, cron map[string]string, isActive, onlyWhenOnline bool) (Attributes, error) {
+	return c.mutate(http.MethodPost, c.serverPath("/schedules"), map[string]interface{}{
+		"name":             name,
+		"minute":           cron["minute"],
+		"hour":             cron["hour"],
+		"day_of_month":     cron["day_of_month"],
+		"month":            cron["month"],
+		"day_of_week":      cron["day_of_week"],
+		"is_active":        isActive,
+		"only_when_online": onlyWhenOnline,
+	})
+}
+
+// UpdateSchedule replaces a schedule's definition. The panel's route is a full
+// replace, so every field has to be sent even when only one changed.
+func (c *Client) UpdateSchedule(scheduleID, name string, cron map[string]string, isActive, onlyWhenOnline bool) (Attributes, error) {
+	return c.mutate(http.MethodPost, c.serverPath("/schedules/%s", scheduleID), map[string]interface{}{
+		"name":             name,
+		"minute":           cron["minute"],
+		"hour":             cron["hour"],
+		"day_of_month":     cron["day_of_month"],
+		"month":            cron["month"],
+		"day_of_week":      cron["day_of_week"],
+		"is_active":        isActive,
+		"only_when_online": onlyWhenOnline,
+	})
+}
+
+// CreateScheduleTask adds a task to a schedule.
+//
+// action is "command", "power" or "backup". payload is the command text, the
+// power signal, or the newline-separated ignore list respectively. timeOffset
+// is the seconds to wait after the previous task.
+func (c *Client) CreateScheduleTask(scheduleID, action, payload string, timeOffset int, continueOnFailure bool) (Attributes, error) {
+	return c.mutate(http.MethodPost, c.serverPath("/schedules/%s/tasks", scheduleID), map[string]interface{}{
+		"action":              action,
+		"payload":             payload,
+		"time_offset":         timeOffset,
+		"continue_on_failure": continueOnFailure,
+	})
+}
+
+// UpdateScheduleTask replaces one task.
+func (c *Client) UpdateScheduleTask(scheduleID, taskID, action, payload string, timeOffset int, continueOnFailure bool) (Attributes, error) {
+	return c.mutate(http.MethodPost, c.serverPath("/schedules/%s/tasks/%s", scheduleID, taskID), map[string]interface{}{
+		"action":              action,
+		"payload":             payload,
+		"time_offset":         timeOffset,
+		"continue_on_failure": continueOnFailure,
+	})
+}
+
+// DeleteScheduleTask removes one task from a schedule.
+func (c *Client) DeleteScheduleTask(scheduleID, taskID string) error {
+	_, err := c.mutate(http.MethodDelete, c.serverPath("/schedules/%s/tasks/%s", scheduleID, taskID), nil)
+	return err
+}

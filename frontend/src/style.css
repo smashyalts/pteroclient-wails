@@ -16,23 +16,26 @@
     --line-strong: #1d2739;
     --line-bright: #26324a;
 
-    /* Text */
-    --text-primary: #e6ebf4;
-    --text-secondary: #8fa0bb;
-    --text-dim: #5d6b85;
-    --text-faint: #46536e;
+    /* Text. Contrast ratios against --bg-secondary in the comment; 4.5 is the
+       minimum for body text, and nothing here that carries words is below 6. */
+    --text-primary: #edf1f8;      /* 15.1 */
+    --text-secondary: #b6c2d6;    /* 10.6 */
+    --text-dim: #98a6bf;          /*  7.8 */
+    --text-faint: #8b99b5;        /*  6.7 */
+    /* For decoration only — separators, disabled glyphs, never words. */
+    --text-ghost: #5d6b85;
 
     /* Signal */
-    --accent: #3b82f6;
-    --accent-bright: #60a5fa;
-    --accent-soft: rgba(59, 130, 246, 0.12);
-    --accent-border: rgba(59, 130, 246, 0.45);
+    --accent: #4b8ef7;
+    --accent-bright: #7db4ff;
+    --accent-soft: rgba(75, 142, 247, 0.16);
+    --accent-border: rgba(75, 142, 247, 0.55);
     --success: #10b981;
-    --success-text: #34d399;
+    --success-text: #4ade80;
     --danger: #ef4444;
-    --danger-text: #f87171;
+    --danger-text: #fb8a8a;
     --warning: #f59e0b;
-    --warning-text: #f9c513;
+    --warning-text: #fbbf24;
 
     /* Shape */
     --radius: 7px;
@@ -66,7 +69,6 @@ body {
     color: var(--text-primary);
     font-family: var(--font-ui);
     font-size: 13px;
-    -webkit-font-smoothing: antialiased;
 }
 
 a {
@@ -1693,20 +1695,11 @@ button.recording { border-color: var(--accent); color: var(--accent); }
 .file-manager.dock-right { flex-direction: row-reverse; }
 .file-manager.dock-bottom { flex-direction: column-reverse; }
 
-.file-manager.dock-bottom > .file-tree {
-    width: auto;
-    height: 220px;
-    min-height: 120px;
-    border-right: 0;
-    border-top: 1px solid var(--line);
-}
+/* Superseded by the .file-pane rules below, which own the sizing now. */
 
-.file-manager.dock-hidden > .file-tree { display: none !important; }
 
-.file-manager.dock-right > .file-tree {
-    border-right: 0;
-    border-left: 1px solid var(--line);
-}
+
+
 
 /* ========================================================================
    Selection bar
@@ -1977,3 +1970,290 @@ body.resizing .split-grip { background: var(--accent); }
 .ws.stacked .ws-grip { width: auto; height: 5px; cursor: row-resize; }
 .ws-grip:hover { background: var(--accent); }
 body.resizing .ws-grip { background: var(--accent); }
+
+/* ========================================================================
+   Legibility
+   ------------------------------------------------------------------------
+   The small type was 400 weight at 10-11.5px in the dimmest token there is.
+   Raising the tokens fixed the colour; this fixes the weight, and nudges the
+   very smallest sizes up a step.
+   ==================================================================== */
+
+.list-sub,
+.empty-state-hint,
+.form-hint,
+.palette-hint,
+.ws-file,
+.split-file,
+.chip-sub,
+.panel-url,
+.status-bar,
+.ws-path,
+.split-tree-path {
+    font-weight: 500;
+}
+
+.eyebrow,
+.form-optional,
+.palette-current,
+.panel-tag,
+.tag {
+    font-weight: 600;
+    letter-spacing: .05em;
+}
+
+.list-sub,
+.form-hint,
+.empty-state-hint { font-size: 12px; }
+
+.palette-hint,
+.chip-sub,
+.ws-file,
+.split-file,
+.ws-path,
+.split-tree-path,
+.status-bar { font-size: 11.5px; }
+
+.eyebrow { font-size: 11px; }
+
+/* Separators and disabled glyphs keep the old dim value; nothing with words
+   in it uses it any more. */
+.rail-sep,
+.header-divider,
+.crumb-sep { color: var(--text-ghost); }
+
+/* The file tree's size column and the console's own chrome were the two other
+   places where real information sat at the bottom of the range. */
+.file-size { color: var(--text-dim); font-weight: 500; }
+.console-line.info { color: var(--accent-bright); }
+
+/* ========================================================================
+   Filter bar
+   ==================================================================== */
+
+.file-pane {
+    display: flex;
+    flex-direction: column;
+    width: 288px;
+    min-width: 120px;
+    max-width: 80vw;
+    flex: none;
+    resize: horizontal;
+    overflow: hidden;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--line);
+}
+
+/* The tree now lives inside .file-pane, which owns the width. */
+.file-pane > .file-tree {
+    width: auto;
+    min-width: 0;
+    max-width: none;
+    flex: 1;
+    resize: none;
+    border-right: 0;
+}
+
+.file-manager.dock-right > .file-pane {
+    border-right: 0;
+    border-left: 1px solid var(--line);
+}
+
+.file-manager.dock-bottom > .file-pane {
+    width: auto;
+    max-width: none;
+    height: 240px;
+    min-height: 120px;
+    border-right: 0;
+    border-top: 1px solid var(--line);
+}
+
+.file-manager.dock-hidden > .file-pane { display: none !important; }
+
+.filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    padding: 8px 8px 6px;
+    border-bottom: 1px solid var(--line);
+}
+
+.filter-bar input {
+    flex: 1;
+    min-width: 0;
+    height: 28px;
+    font-size: 12px;
+}
+
+.filter-bar.sm { padding: 6px; }
+.filter-bar.sm input { height: 24px; font-size: 11.5px; }
+
+.filter-count {
+    flex: none;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    white-space: nowrap;
+}
+
+.filter-count.none { color: var(--warning-text); }
+
+.filter-clear {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--text-dim);
+    font-size: 16px;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.filter-clear:hover { color: var(--text-primary); background: none; }
+
+/* ========================================================================
+   Checklist dialog
+   ==================================================================== */
+
+.checklist {
+    max-height: 46vh;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+
+.checklist-group { margin-bottom: 14px; }
+
+.checklist-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--line);
+}
+
+.checklist-hint { font-size: 11.5px; color: var(--text-faint); }
+
+.checklist-items {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+    gap: 2px;
+    margin-top: 8px;
+}
+
+label.check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 6px;
+    border-radius: 5px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+label.check:hover { background: var(--bg-hover); }
+label.check input { width: 14px; height: 14px; flex: none; accent-color: var(--accent); }
+
+.check-key {
+    margin-left: auto;
+    font-size: 10.5px;
+    color: var(--text-ghost);
+}
+
+/* ========================================================================
+   Schedule tasks
+   ==================================================================== */
+
+.task-list {
+    border-top: 1px solid var(--line);
+    padding: 4px 0;
+}
+
+.task-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 7px 14px 7px 46px;
+    font-size: 12.5px;
+    color: var(--text-secondary);
+}
+
+.task-row:hover { background: var(--bg-hover); }
+
+.task-offset {
+    flex: none;
+    min-width: 46px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+}
+
+.task-body { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+
+.task-empty {
+    padding: 12px 14px 12px 46px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--text-faint);
+}
+
+.task-add {
+    padding: 6px 14px 8px 46px;
+}
+
+/* ========================================================================
+   Textarea inside a dialog
+   ==================================================================== */
+
+.modal-body textarea {
+    width: 100%;
+    min-height: 80px;
+    padding: 9px 11px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    line-height: 1.55;
+    resize: vertical;
+}
+
+.modal-body textarea:focus {
+    outline: none;
+    border-color: var(--accent-border);
+}
+
+/* ========================================================================
+   Console window mode
+   ------------------------------------------------------------------------
+   The same frontend with one job. Everything that is not the console is
+   hidden rather than removed, so the bindings underneath keep working.
+   ==================================================================== */
+
+body.console-window .rail,
+body.console-window .resource-strip,
+body.console-window #consolePopBtn,
+body.console-window .chip-wrap.panel-selector,
+body.console-window #refreshServersBtn,
+body.console-window #managePanelsBtn,
+body.console-window .header-divider { display: none !important; }
+
+body.console-window .tab-content:not(#consoleTab) { display: none !important; }
+
+body.console-window .workspace { height: calc((100vh / var(--ui-scale, 1)) - var(--titlebar-h)); }
+body.console-window .stage { padding: 0; }
+body.console-window .header { padding-right: 14px; }
+
+/* The server it belongs to is the only thing worth naming up there. */
+body.console-window .logo-sub::after { content: " · console"; }
+
+/* A drop from the desktop, on the way in. */
+.file-pane.drop-target {
+    outline: 2px dashed var(--accent);
+    outline-offset: -4px;
+    background: rgba(75, 142, 247, .06);
+}

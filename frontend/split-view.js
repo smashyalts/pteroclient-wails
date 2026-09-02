@@ -108,6 +108,8 @@
             '  <div class="ws-body">' +
             '    <div class="ws-explorer">' +
             '      <div class="ws-path mono" data-role="path">/</div>' +
+            '      <div class="filter-bar sm"><input type="text" data-role="filter" autocomplete="off" ' +
+            '        spellcheck="false" placeholder="Filter…"></div>' +
             '      <div class="ws-list" data-role="list"></div>' +
             '    </div>' +
             '    <div class="ws-grip" data-innergrip="' + side + '"></div>' +
@@ -218,6 +220,48 @@
         });
 
         list.innerHTML = html || '<div class="preview-empty">Empty folder</div>';
+
+        // Browsing elsewhere clears the box, or the new folder comes up
+        // looking empty because of a word typed in the old one.
+        const box = el(side, '[data-role="filter"]');
+        if (box) box.value = '';
+        applyFilter(side, '');
+    }
+
+    /** Hides rows in one workspace that do not match. `..` always stays. */
+    function applyFilter(side, query) {
+        const needle = String(query || '').trim().toLowerCase();
+        const list = el(side, '[data-role="list"]');
+        if (!list) return;
+
+        let shown = 0;
+        list.querySelectorAll('.file-item').forEach((row) => {
+            if (row.dataset.updir) return;
+            const hit = !needle || String(row.dataset.name || '').toLowerCase().indexOf(needle) !== -1;
+            row.hidden = !hit;
+            if (hit) shown++;
+        });
+
+        let none = list.querySelector('.ws-filter-empty');
+        if (needle && shown === 0) {
+            if (!none) {
+                none = document.createElement('div');
+                none.className = 'preview-empty ws-filter-empty';
+                list.appendChild(none);
+            }
+            none.textContent = 'Nothing here matches "' + query + '"';
+            none.hidden = false;
+        } else if (none) {
+            none.hidden = true;
+        }
+    }
+
+    /** Ctrl+F lands in the focused workspace's box. */
+    function focusFilter() {
+        const box = el(focused, '[data-role="filter"]');
+        if (!box) return;
+        box.focus();
+        box.select();
     }
 
     function buildEditor(side) {
@@ -426,6 +470,21 @@
 
     /* ------------------------------------------------------- server change */
 
+    /** The deepest part of `path` that exists on `serverID`, or "/". */
+    async function nearestPath(serverID, path) {
+        const parts = String(path || '/').split('/').filter(Boolean);
+        while (parts.length) {
+            const candidate = '/' + parts.join('/');
+            try {
+                await go().ListFilesFromServer(serverID, candidate);
+                return candidate;
+            } catch (err) {
+                parts.pop();
+            }
+        }
+        return '/';
+    }
+
     async function setServer(side, id, name, panel) {
         const st = space(side);
 
@@ -437,10 +496,13 @@
             if (!ok) return false;
         }
 
+        // Carried across the switch, the same way the main explorer does it.
+        const wasAt = st.path || '/';
+
         st.serverID = id;
         st.serverName = name || '';
         st.panel = panel || '';
-        st.path = '/';
+        st.path = id ? await nearestPath(id, wasAt) : '/';
         st.tabs.forEach((_tab, path) => editor(side).dropModel(path));
         st.tabs.clear();
         st.activeTab = null;
@@ -449,7 +511,7 @@
         el(side, '[data-role="filename"]').textContent = 'no file open';
         renderTabs(side);
         refreshSave(side);
-        await browse(side, '/');
+        await browse(side, st.path);
         window.Session && window.Session.save();
         return true;
     }
@@ -763,7 +825,26 @@
         setFocus(side);
     });
 
-document.addEventListener('focusin', (e) => {
+    document.addEventListener('input', (e) => {
+        if (!active) return;
+        const box = e.target.closest('#splitRoot [data-role="filter"]');
+        if (!box) return;
+        applyFilter(box.closest('.ws').getAttribute('data-side'), box.value);
+    });
+
+    // Capture, so Escape clears the box before the hotkey manager reads it as
+    // "clear the file selection".
+    document.addEventListener('keydown', (e) => {
+        if (!active || e.key !== 'Escape') return;
+        const box = e.target.closest && e.target.closest('#splitRoot [data-role="filter"]');
+        if (!box) return;
+        e.stopPropagation();
+        box.value = '';
+        applyFilter(box.closest('.ws').getAttribute('data-side'), '');
+        box.blur();
+    }, true);
+
+    document.addEventListener('focusin', (e) => {
         if (!active) return;
         const ws = e.target.closest && e.target.closest('#splitRoot .ws');
         if (ws) {
@@ -797,6 +878,7 @@ document.addEventListener('focusin', (e) => {
         toggle, open, close, save, saveAll,
         isActive: () => active,
         focus: setFocus,
+        focusFilter: focusFilter,
         // Session restore reaches in through these.
         state: () => ({
             outer: outer,

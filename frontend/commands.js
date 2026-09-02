@@ -13,7 +13,16 @@
     const tab = () => (window.Shell ? window.Shell.currentTab() : '');
     const onFiles = () => tab() === 'files';
     const hasOpenFile = () => !!(app() && app().activeFile);
-    const splitOn = () => !!(window.SplitView && window.SplitView.isActive());
+
+    // The split view owns the keyboard while the caret is inside it: each
+    // workspace saves its own focused tab, which the main editor's Ctrl+S
+    // knows nothing about.
+    const inSplit = () => !!(document.activeElement && document.activeElement.closest &&
+        document.activeElement.closest('#splitRoot'));
+
+    // Escape has two jobs. Closing whatever is on top comes first, or a dialog
+    // opened over a selected file could not be dismissed.
+    const overlayOpen = () => !!document.querySelector('.modal.show, .palette.show');
 
     function register() {
         const R = window.UX.registerCommand;
@@ -91,6 +100,19 @@
         });
 
         R({
+            id: 'files.find', group: 'Files', key: 'Ctrl+F',
+            label: 'Filter this folder',
+            allowInField: true,
+            when: onFiles,
+            run: () => {
+                // In the split view each workspace has its own box; the
+                // focused one is the one being looked at.
+                if (window.SplitView && window.SplitView.isActive()) return window.SplitView.focusFilter();
+                app().focusFilter();
+            }
+        });
+
+        R({
             id: 'files.refresh', group: 'Files', key: 'F5',
             label: 'Refresh the file list',
             when: onFiles,
@@ -114,7 +136,7 @@
         R({
             id: 'files.clearSelection', group: 'Files', key: 'Escape',
             label: 'Clear the selection',
-            when: () => onFiles() && app().selection.size > 0,
+            when: () => onFiles() && !overlayOpen() && app().selection.size > 0,
             run: () => app().clearSelection()
         });
 
@@ -159,7 +181,7 @@
             id: 'file.save', group: 'Editor', key: 'Ctrl+S',
             label: 'Save',
             allowInField: true,
-            when: hasOpenFile,
+            when: () => hasOpenFile() && !inSplit(),
             run: () => app().saveFile()
         });
 
@@ -167,7 +189,7 @@
             id: 'file.saveAll', group: 'Editor', key: 'Ctrl+Shift+S',
             label: 'Save every open file',
             allowInField: true,
-            when: () => !!(app() && app().openFiles.size),
+            when: () => !!(app() && app().openFiles.size) && !inSplit(),
             run: () => app().saveAllFiles()
         });
 
@@ -175,7 +197,7 @@
             id: 'file.close', group: 'Editor', key: 'Ctrl+W',
             label: 'Close the open file',
             allowInField: true,
-            when: hasOpenFile,
+            when: () => hasOpenFile() && !inSplit(),
             run: () => app().closeFile()
         });
 

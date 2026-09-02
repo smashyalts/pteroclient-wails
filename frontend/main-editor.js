@@ -148,6 +148,8 @@ function initApp() {
         // Console command history, oldest first.
         commandHistory: [],
         commandCursor: -1,
+        // Live filter over the rows already rendered for this folder.
+        filterQuery: '',
         isConnected: false,
         consoleConnected: false,
         // Set while the panel form is editing an existing panel rather than
@@ -171,6 +173,7 @@ function initApp() {
             this.setupEventListeners();
             this.setupKeyboardShortcuts();
             this.setupMouseNavigation();
+            this.setupDropUpload();
             await this.checkConfig();
         },
         
@@ -361,16 +364,18 @@ function initApp() {
             
             window.runtime.EventsOn('server-changed', (serverID) => {
                 console.log('Server changed to:', serverID);
-                // Reset path and history when server changes
-                this.currentPath = '/';
+
+                // Where we were, before the reset below throws it away.
+                const wasAt = this.currentPath || '/';
+
                 this.navigationHistory = ['/'];
                 this.navigationIndex = 0;
                 // Clear console and reload files for the new server
                 this.clearConsole();
                 this.appendConsole('=== Switched to server: ' + serverID + ' ===', 'info');
-                this.loadFiles('/');
                 // Close all open files as they belong to the previous server
                 this.closeAllFiles();
+                this.loadNearest(wasAt);
                 // SwitchServer drops the old console; bring the new one up
                 // rather than making the Connect button a required step.
                 this.consoleConnected = false;
@@ -399,6 +404,28 @@ function initApp() {
             }
             
             // Console input
+            const filterInput = document.getElementById('fileFilter');
+            if (filterInput) {
+                // input, not keyup: it fires for paste and for held keys too.
+                filterInput.addEventListener('input', () => this.setFilter(filterInput.value));
+                filterInput.addEventListener('keydown', (e) => {
+                    if (e.key !== 'Escape') return;
+                    e.stopPropagation();
+                    filterInput.value = '';
+                    this.setFilter('');
+                    filterInput.blur();
+                });
+            }
+            const filterClear = document.getElementById('fileFilterClear');
+            if (filterClear) {
+                filterClear.addEventListener('click', () => {
+                    const box = document.getElementById('fileFilter');
+                    box.value = '';
+                    this.setFilter('');
+                    box.focus();
+                });
+            }
+
             const commandInput = document.getElementById('commandInput');
             if (commandInput) {
                 commandInput.addEventListener('keydown', (e) => {
@@ -542,6 +569,12 @@ function initApp() {
             // how a delete aimed at /a/config.yml lands on /b/config.yml.
             this.clearSelection();
 
+            // And drops the filter, or the folder you just opened comes up
+            // looking empty because of a word you typed somewhere else.
+            const filterInput = document.getElementById('fileFilter');
+            if (filterInput) filterInput.value = '';
+            this.filterQuery = '';
+
             // Add to navigation history
             this.addToHistory(path);
             
@@ -596,13 +629,68 @@ function initApp() {
                 tree.appendChild(item);
             });
 
+            this.applyFilter();
             this.updateSelectionUI();
-            
+
             if (files.length === 0 && this.currentPath === '/') {
                 tree.innerHTML = '<div class="preview-empty">No files found</div>';
             }
         },
-        
+
+        /**
+         * Hides rows that do not match. The parent-directory row always stays,
+         * or filtering to nothing would trap you in the folder.
+         */
+        applyFilter() {
+            const query = String(this.filterQuery || '').trim().toLowerCase();
+            const countEl = document.getElementById('fileFilterCount');
+            const clearEl = document.getElementById('fileFilterClear');
+
+            let shown = 0;
+            document.querySelectorAll('#fileTree .file-item').forEach((row) => {
+                const name = row.querySelector('.file-name');
+                const label = name ? name.textContent : '';
+                if (label === '..') return;                 // the way out stays
+                const hit = !query || label.toLowerCase().indexOf(query) !== -1;
+                row.hidden = !hit;
+                if (hit) shown++;
+            });
+
+            const total = this.renderedRows.length;
+            if (countEl) {
+                countEl.hidden = !query;
+                countEl.textContent = shown + ' of ' + total;
+                countEl.classList.toggle('none', query && shown === 0);
+            }
+            if (clearEl) clearEl.hidden = !query;
+
+            let none = document.getElementById('fileFilterEmpty');
+            if (query && shown === 0) {
+                if (!none) {
+                    none = document.createElement('div');
+                    none.id = 'fileFilterEmpty';
+                    none.className = 'preview-empty';
+                    document.getElementById('fileTree').appendChild(none);
+                }
+                none.textContent = 'Nothing in this folder matches "' + query + '"';
+                none.hidden = false;
+            } else if (none) {
+                none.hidden = true;
+            }
+        },
+
+        setFilter(query) {
+            this.filterQuery = query || '';
+            this.applyFilter();
+        },
+
+        focusFilter() {
+            const input = document.getElementById('fileFilter');
+            if (!input) return;
+            input.focus();
+            input.select();
+        },
+
         createFileItem(file, isParent = false) {
             const div = document.createElement('div');
             div.className = 'file-item';
@@ -633,6 +721,20 @@ function initApp() {
             div.appendChild(name);
             div.appendChild(size);
             
+            if (!isParent && !file.isDir) {
+                div.setAttribute('draggable', 'true');
+                div.addEventListener('dragstart', (e) => {
+                    const url = this.downloadURLs && this.downloadURLs.get(fullPath);
+                    if (url) {
+                        // Chromium's contract for a drag the OS shell accepts.
+                        e.dataTransfer.setData('DownloadURL',
+                            'application/octet-stream:' + file.name + ':' + url);
+                    }
+                    e.dataTransfer.setData('text/plain', fullPath);
+                    e.dataTransfer.effectAllowed = 'copy';
+                });
+            }
+
             // Press feedback. Clicking a row used to do nothing visible until
             // the file had loaded, which on a slow panel read as a dead click.
             div.addEventListener('pointerdown', () => {
@@ -692,6 +794,7 @@ function initApp() {
         markSelected(row, entry) {
             this.selection.clear();
             if (entry && entry.path) this.selection.set(entry.path, entry);
+            this.prefetchDownloadURL(entry);
             this.selectedFile = entry;
             this.contextFile = entry;
             this.paintSelection();
@@ -737,11 +840,12 @@ function initApp() {
         },
 
         selectAllFiles() {
+            // What is on screen, not what the folder holds: selecting rows a
+            // filter is hiding is how you delete something you cannot see.
+            const visible = this.renderedRows.filter(r => !r.el.hidden);
             this.selection.clear();
-            this.renderedRows.forEach(r => this.selection.set(r.path, r.entry));
-            this.selectedFile = this.renderedRows.length
-                ? this.renderedRows[this.renderedRows.length - 1].entry
-                : null;
+            visible.forEach(r => this.selection.set(r.path, r.entry));
+            this.selectedFile = visible.length ? visible[visible.length - 1].entry : null;
             this.contextFile = this.selectedFile;
             this.paintSelection();
         },
@@ -1216,6 +1320,40 @@ function initApp() {
             this.applyTreeDock(['left', 'right', 'bottom', 'hidden'].indexOf(stored) === -1 ? 'left' : stored);
         },
 
+        /**
+         * Opens `path` on the current server, or the deepest part of it that
+         * exists.
+         *
+         * Two servers on one host usually share a layout, so carrying the path
+         * across a switch saves walking back down it. When the folder is not
+         * there, each parent is tried in turn — /Kite/scripts missing still
+         * leaves you at /Kite — and the root is the last resort.
+         */
+        async loadNearest(path) {
+            const parts = String(path || '/').split('/').filter(Boolean);
+
+            while (parts.length) {
+                const candidate = '/' + parts.join('/');
+                try {
+                    await window.go.main.App.ListFiles(candidate);
+                    await this.loadFiles(candidate);
+                    if (candidate !== path) {
+                        window.UX.toast.show('This server has no ' + path + ' — opened ' + candidate,
+                            { duration: 3400 });
+                    }
+                    return candidate;
+                } catch (err) {
+                    parts.pop();
+                }
+            }
+
+            await this.loadFiles('/');
+            if (path && path !== '/') {
+                window.UX.toast.show('This server has no ' + path + ' — opened /', { duration: 3400 });
+            }
+            return '/';
+        },
+
         // File operations
         async refreshFiles() {
             await this.loadFiles(this.currentPath);
@@ -1224,6 +1362,173 @@ function initApp() {
         uploadFile() {
             const input = document.getElementById('fileInput');
             if (input) input.click();
+        },
+
+        /**
+         * Walks a drop into a flat list of {file, relPath}.
+         *
+         * dataTransfer.files is flat and loses the folder a file came from, so
+         * the entries API is used when the browser offers it and the plain
+         * list is the fallback.
+         */
+        async collectDrop(dataTransfer) {
+            const MAX = 500;
+            const out = [];
+
+            const items = Array.from(dataTransfer.items || []);
+            const roots = items
+                .map((it) => (it.webkitGetAsEntry ? it.webkitGetAsEntry() : null))
+                .filter(Boolean);
+
+            if (!roots.length) {
+                Array.from(dataTransfer.files || []).forEach((file) => {
+                    out.push({ file: file, relPath: file.name });
+                });
+                return { entries: out.slice(0, MAX), truncated: out.length > MAX };
+            }
+
+            let truncated = false;
+
+            async function walk(entry, prefix) {
+                if (out.length >= MAX) {
+                    truncated = true;
+                    return;
+                }
+                if (entry.isFile) {
+                    const file = await new Promise((res, rej) => entry.file(res, rej));
+                    out.push({ file: file, relPath: prefix + entry.name });
+                    return;
+                }
+                // readEntries hands back at most a hundred at a time and
+                // signals the end with an empty batch.
+                const reader = entry.createReader();
+                for (;;) {
+                    const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+                    if (!batch.length) break;
+                    for (const child of batch) await walk(child, prefix + entry.name + '/');
+                    if (out.length >= MAX) {
+                        truncated = true;
+                        break;
+                    }
+                }
+            }
+
+            for (const root of roots) await walk(root, '');
+            return { entries: out, truncated: truncated };
+        },
+
+        /**
+         * Uploads a walked drop into the current folder.
+         *
+         * Collisions are gathered and asked about once. Answering no leaves
+         * every existing file alone and still uploads the rest.
+         */
+        async uploadDrop(entries, truncated) {
+            if (!entries.length) return;
+
+            const base = this.currentPath === '/' ? '' : this.currentPath;
+            const busy = window.UX.toast.show('Uploading ' + entries.length + ' file(s)…', { duration: 600000 });
+
+            // Parent folders first, deepest last, so each one has somewhere to
+            // go. Already-exists is the normal case and not an error.
+            const folders = new Set();
+            entries.forEach((e) => {
+                const parts = e.relPath.split('/');
+                parts.pop();
+                let acc = '';
+                parts.forEach((part) => {
+                    acc += '/' + part;
+                    folders.add(acc);
+                });
+            });
+
+            for (const folder of Array.from(folders).sort()) {
+                try {
+                    await window.go.main.App.CreateFolder(base + folder);
+                } catch (err) {
+                    if (String(err).indexOf('already exists') === -1) {
+                        console.warn('Could not create ' + folder + ':', err);
+                    }
+                }
+            }
+
+            const clashes = [];
+            const failed = [];
+            let done = 0;
+
+            for (const entry of entries) {
+                const target = base + '/' + entry.relPath;
+                let bytes;
+                try {
+                    bytes = Array.from(new Uint8Array(await entry.file.arrayBuffer()));
+                } catch (err) {
+                    failed.push(entry.relPath + ' — could not be read');
+                    continue;
+                }
+
+                try {
+                    await window.go.main.App.UploadFileSafe(target, bytes, false);
+                    done++;
+                } catch (err) {
+                    if (String(err).indexOf('already exists') !== -1) clashes.push({ entry: entry, target: target, bytes: bytes });
+                    else failed.push(entry.relPath + ' — ' + err);
+                }
+            }
+
+            busy.dismiss();
+
+            if (clashes.length) {
+                const ok = await this.ask(clashes.length + ' already there',
+                    clashes.slice(0, 8).map(c => '<span class="mono">' + this.escapeHtml(c.entry.relPath) + '</span>').join('<br>') +
+                    (clashes.length > 8 ? '<br>…and ' + (clashes.length - 8) + ' more' : '') +
+                    '<br><br>Replace them? Each one goes to the recycle bin first.',
+                    { danger: true, confirmLabel: 'Replace them' });
+
+                if (ok) {
+                    for (const c of clashes) {
+                        try {
+                            await window.go.main.App.UploadFileSafe(c.target, c.bytes, true);
+                            done++;
+                        } catch (err) {
+                            failed.push(c.entry.relPath + ' — ' + err);
+                        }
+                    }
+                }
+            }
+
+            await this.refreshFiles();
+
+            if (done) window.UX.toast.ok('Uploaded ' + done + ' file(s)');
+            if (truncated) window.UX.toast.warn('Only the first 500 files were taken from that drop');
+            if (failed.length) await this.say('Some files did not upload', failed.join('\n'));
+        },
+
+        /** Wires the explorer as a drop target for files from the desktop. */
+        setupDropUpload() {
+            const pane = document.querySelector('.file-pane');
+            if (!pane) return;
+
+            const isFileDrop = (e) => Array.from(e.dataTransfer.types || []).indexOf('Files') !== -1;
+
+            pane.addEventListener('dragover', (e) => {
+                if (!isFileDrop(e)) return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+                pane.classList.add('drop-target');
+            });
+
+            pane.addEventListener('dragleave', (e) => {
+                if (!pane.contains(e.relatedTarget)) pane.classList.remove('drop-target');
+            });
+
+            pane.addEventListener('drop', async (e) => {
+                if (!isFileDrop(e)) return;
+                e.preventDefault();
+                pane.classList.remove('drop-target');
+
+                const walked = await this.collectDrop(e.dataTransfer);
+                await this.uploadDrop(walked.entries, walked.truncated);
+            });
         },
         
         async handleFileUpload(files) {
@@ -1565,19 +1870,72 @@ function initApp() {
         },
 
         async downloadFile() {
-            const path = this.resolvePath(this.selectedFile);
-            if (!path || this.selectedFile.isDir) {
-                await this.say('Cannot download', 'Pick a file. The panel does not serve folders as a single download.');
+            await this.downloadSelected();
+        },
+
+        /**
+         * Saves the selection onto this machine.
+         *
+         * One file gets a Save-as dialog, anything else asks for a folder. A
+         * folder in the selection is archived on the panel first and the
+         * archive is what comes down — the client API serves files, not trees —
+         * and the archive is cleaned up afterwards.
+         */
+        async downloadSelected() {
+            const paths = this.selectionPaths();
+            if (!paths.length) {
+                await this.say('Nothing selected', 'Pick what you want to download first.');
                 return;
             }
 
+            const folders = Array.from(this.selection.values()).filter(e => e.isDir).length;
+            const busy = window.UX.toast.show(
+                folders ? 'Archiving and downloading…' : 'Downloading…', { duration: 120000 });
+
             try {
-                const url = await window.go.main.App.GetFileDownloadURL(path);
-                if (window.runtime && window.runtime.BrowserOpenURL) window.runtime.BrowserOpenURL(url);
-                else window.open(url, '_blank');
+                const out = await window.go.main.App.DownloadToDisk(paths);
+                busy.dismiss();
+
+                if (out.cancelled) return;
+
+                if (out.files.length) {
+                    window.UX.toast.ok(
+                        out.files.length + ' saved to ' + out.directory +
+                        ' (' + this.formatSize(out.bytes) + ')');
+                }
+                if (out.skipped && out.skipped.length) {
+                    await this.say('Some files did not come down', out.skipped.join('\n'));
+                }
+                if (!out.files.length && !(out.skipped || []).length) {
+                    window.UX.toast.warn('Nothing was downloaded');
+                }
             } catch (err) {
+                busy.dismiss();
                 await this.say('Could not download', String(err));
             }
+        },
+
+        /**
+         * Best-effort drag of a file out to the desktop.
+         *
+         * The shell only accepts a drop when the drag carries a DownloadURL,
+         * and that has to be on the dataTransfer synchronously — but the panel
+         * hands out signed URLs over the network. So the URL is fetched when a
+         * file is selected, which is always a moment or two before the drag,
+         * and the drag uses it if it arrived. If it did not, the drag simply
+         * does not leave the window; use Download instead.
+         */
+        prefetchDownloadURL(entry) {
+            if (!entry || entry.isDir || !entry.path) return;
+            if (this.downloadURLs && this.downloadURLs.has(entry.path)) return;
+
+            if (!this.downloadURLs) this.downloadURLs = new Map();
+            window.go.main.App.GetFileDownloadURL(entry.path).then((url) => {
+                // Signed URLs are short lived, so this is a cache with a
+                // deliberately short memory rather than a store.
+                this.downloadURLs.set(entry.path, url);
+                setTimeout(() => this.downloadURLs.delete(entry.path), 60000);
+            }).catch(() => {});
         },
         
         showContextMenu(event, file) {
@@ -1738,6 +2096,22 @@ function initApp() {
             }
         },
         
+        /**
+         * Opens this server's console in its own OS window.
+         *
+         * A second process, because Wails v2 gives one window per process. It
+         * reads the same config and opens its own websocket, which the panel
+         * serves alongside this one.
+         */
+        async popOutConsole() {
+            try {
+                await window.go.main.App.OpenConsoleWindow('');
+                window.UX.toast.ok('Console window opening — it is a separate window, so it can go on another monitor');
+            } catch (err) {
+                await this.say('Could not open the console window', String(err));
+            }
+        },
+
         async connectConsole() {
             try {
                 if (this.consoleConnected) {

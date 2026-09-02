@@ -227,7 +227,7 @@
             }
             return;
         }
-    });
+    }, true);   // capture: Monaco eats Ctrl+K and friends on the way up
 
     /* ------------------------------------------------------- command palette */
 
