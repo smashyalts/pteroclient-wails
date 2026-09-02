@@ -24,6 +24,12 @@
     // opened over a selected file could not be dismissed.
     const overlayOpen = () => !!document.querySelector('.modal.show, .palette.show');
 
+    // Some keys belong to the editor when the caret is in it. Ctrl+F is its
+    // find, Ctrl+/ its line comment — taking those for the file explorer and
+    // the hotkey list made both unreachable while editing.
+    const inCodeEditor = () => !!(document.activeElement && document.activeElement.closest &&
+        document.activeElement.closest('#editor, .monaco-editor, .ws-code'));
+
     function register() {
         const R = window.UX.registerCommand;
 
@@ -102,8 +108,10 @@
         R({
             id: 'files.find', group: 'Files', key: 'Ctrl+F',
             label: 'Filter this folder',
+            // allowInField so it works from the filter box itself, but not
+            // from the editor, where Ctrl+F is Monaco's find.
             allowInField: true,
-            when: onFiles,
+            when: () => onFiles() && !inCodeEditor(),
             run: () => {
                 // In the split view each workspace has its own box; the
                 // focused one is the one being looked at.
@@ -279,6 +287,8 @@
             id: 'help.hotkeys', group: 'Help', key: 'Ctrl+/',
             label: 'Hotkeys',
             allowInField: true,
+            // Ctrl+/ is toggle-comment while the caret is in code.
+            when: () => !inCodeEditor(),
             run: () => window.UX.openHotkeys()
         });
 
