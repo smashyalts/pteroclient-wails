@@ -297,17 +297,21 @@
 </div>
 
 <!-- Context menu ========================================================= -->
+<!-- data-files-only items are hidden when the click was on a folder: opening
+     one in the editor, duplicating it or extracting it are not things a folder
+     does, and offering them was offering something that does nothing. -->
 <div id="contextMenu" class="context-menu">
-    <div class="menu-item" onclick="window.app.openFile()">Open</div>
-    <div class="menu-item" onclick="window.app.openInNewTab()">Open in new tab</div>
+    <div class="menu-item" data-files-only onclick="window.app.openFile()">Open</div>
+    <div class="menu-item" data-files-only onclick="window.app.openInNewTab()">Open in new tab</div>
+    <div class="menu-item" data-dirs-only onclick="window.app.openContextFolder()">Open folder</div>
     <div class="menu-item" onclick="window.app.renameFile()">Rename</div>
-    <div class="menu-item" onclick="window.app.duplicateFile()">Duplicate</div>
+    <div class="menu-item" data-files-only onclick="window.app.duplicateFile()">Duplicate</div>
     <div class="separator"></div>
     <div class="menu-item" onclick="window.app.copyPath()">Copy path</div>
     <div class="menu-item" onclick="window.app.downloadFile()">Download</div>
     <div class="separator"></div>
     <div class="menu-item" onclick="window.app.archiveSelected()">Archive selection</div>
-    <div class="menu-item" onclick="window.app.extractSelected()">Extract archive</div>
+    <div class="menu-item" data-files-only onclick="window.app.extractSelected()">Extract archive</div>
     <div class="separator"></div>
     <div class="menu-item danger" onclick="window.app.deleteFile()">Delete</div>
 </div>

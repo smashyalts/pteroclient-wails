@@ -2280,6 +2280,10 @@ body.console-window .header { padding-right: 14px; }
 body.console-window .logo-sub::after { content: " · console"; }
 
 /* A drop from the desktop, on the way in. */
+/* While a cached listing is on screen and the real one is on its way. Enough
+   to say "this may be a moment out of date", not enough to be distracting. */
+.file-tree.stale { opacity: .82; }
+
 .file-pane.drop-target {
     outline: 2px dashed var(--accent);
     outline-offset: -4px;

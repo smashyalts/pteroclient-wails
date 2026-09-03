@@ -382,10 +382,14 @@ function replaceEditor() {
     // different directory, and recomputing here pointed the model at a file
     // with the same name somewhere else.
     const originalOpenFile = app.openFile;
-    app.openFile = async function(file) {
-        const result = await originalOpenFile.call(this, file);
+    app.openFile = async function(file, opts) {
+        // opts has to be forwarded: dropping it here is what made a middle
+        // click — which asks for the file in a background tab — switch to it
+        // anyway, and then set the model and the language for it.
+        const result = await originalOpenFile.call(this, file, opts);
+        const background = !!(opts && opts.background);
 
-        if (monacoEditor && file && !file.isDir) {
+        if (monacoEditor && !background && file && !file.isDir) {
             const filePath = this.resolvePath(file);
             // originalOpenFile bails out for binary and oversized files, so
             // there is nothing open to point a model at.
@@ -402,6 +406,7 @@ function replaceEditor() {
 
             if (monacoEditor.getModel() !== model) monacoEditor.setModel(model);
 
+
             // Update file type display
             const typeEl = document.getElementById('fileType');
             if (typeEl) {
@@ -412,6 +417,16 @@ function replaceEditor() {
                     ini: 'INI', shell: 'Shell', plaintext: 'Plain Text', log: 'Log'
                 };
                 typeEl.textContent = types[language] || language;
+            }
+        }
+
+        if (monacoEditor && background && file && !file.isDir) {
+            const filePath = this.resolvePath(file);
+            if (filePath && this.openFiles.has(filePath) && !monacoModels.get(filePath)) {
+                // Build the model but leave it off screen, so switching to the
+                // tab later is instant and does not re-read the file.
+                const content = this.openFiles.get(filePath).content || '';
+                monacoModels.set(filePath, monaco.editor.createModel(content, languageFor(file.name)));
             }
         }
 

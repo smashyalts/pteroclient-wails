@@ -596,16 +596,93 @@ function initApp() {
             const tree = document.getElementById('fileTree');
             if (!tree) return;
             
-            tree.innerHTML = '<div class="loading">Loading files...</div>';
-            
+            // Draw the last known contents straight away and refresh behind
+            // them. Stepping back out of a folder used to blank the list and
+            // say "Loading files..." for something already seen a moment ago.
+            const cacheKey = (config.serverID || '') + '\u0000' + path;
+            const cached = this.dirCacheGet(cacheKey);
+            const token = (this.listToken = (this.listToken || 0) + 1);
+
+            if (cached) {
+                this.renderFiles(cached.slice());
+                tree.classList.add('stale');
+            } else {
+                tree.innerHTML = '<div class="loading">Loading files...</div>';
+            }
+
             try {
                 const files = await window.go.main.App.ListFiles(path);
-                console.log('Files loaded:', files);
+                // A slower earlier request must not overwrite a newer folder.
+                if (token !== this.listToken) return;
+                this.dirCachePut(cacheKey, files || []);
                 this.renderFiles(files || []);
+                tree.classList.remove('stale');
             } catch (err) {
+                if (token !== this.listToken) return;
                 console.error('Failed to load files:', err);
-                tree.innerHTML = '<div class="error">Failed to load files: ' + err + '</div>';
+                tree.classList.remove('stale');
+                if (cached) {
+                    // The cached list is still on screen, which beats replacing
+                    // something readable with an error.
+                    window.UX.toast.bad('Could not refresh this folder: ' + err);
+                } else {
+                    tree.innerHTML = '<div class="error">Failed to load files: ' + err + '</div>';
+                }
             }
+        },
+
+        /* ------------------------------------------------- directory cache */
+
+        // Bounded by entries rather than bytes: a listing is names and sizes,
+        // and 120 folders of them is a few hundred KB at worst. Oldest use
+        // goes first, so walking a deep tree does not evict the top of it.
+        dirCacheGet(key) {
+            if (!this.dirCache) this.dirCache = new Map();
+            const hit = this.dirCache.get(key);
+            if (!hit) return null;
+            if (Date.now() - hit.at > 5 * 60 * 1000) {
+                this.dirCache.delete(key);
+                return null;
+            }
+            // Touch, so this becomes the most recently used.
+            this.dirCache.delete(key);
+            this.dirCache.set(key, hit);
+            return hit.files;
+        },
+
+        dirCachePut(key, files) {
+            if (!this.dirCache) this.dirCache = new Map();
+            const DIR_CACHE_MAX = 120;
+            const ENTRY_MAX = 3000;
+            if (files.length > ENTRY_MAX) {
+                // A folder this size is slow to render from cache anyway, and
+                // holding several of them is where the memory would go.
+                this.dirCache.delete(key);
+                return;
+            }
+            this.dirCache.delete(key);
+            this.dirCache.set(key, { files: files.slice(), at: Date.now() });
+            while (this.dirCache.size > DIR_CACHE_MAX) {
+                this.dirCache.delete(this.dirCache.keys().next().value);
+            }
+        },
+
+        // Anything that changes a folder makes its cached copy a lie.
+        dirCacheForget(paths) {
+            if (!this.dirCache) return;
+            const dirs = new Set();
+            (paths || []).forEach((p) => {
+                dirs.add(p.slice(0, p.lastIndexOf('/')) || '/');
+                dirs.add(p);
+            });
+            Array.from(this.dirCache.keys()).forEach((key) => {
+                const path = key.slice(key.indexOf('\u0000') + 1);
+                if (dirs.has(path)) this.dirCache.delete(key);
+            });
+        },
+
+        dirCacheClear() {
+            if (this.dirCache) this.dirCache.clear();
         },
         
         renderFiles(files) {
@@ -913,6 +990,20 @@ function initApp() {
                 }
             });
 
+            // Middle click loads the file into a tab and leaves you where you
+            // are. auxclick is the event that fires for button 1; mousedown
+            // alone would also autoscroll.
+            div.addEventListener('auxclick', (e) => {
+                if (e.button !== 1 || isParent || file.isDir) return;
+                e.preventDefault();
+                e.stopPropagation();
+                this.openFile(entry, { background: true });
+            });
+            div.addEventListener('mousedown', (e) => {
+                // Suppress the autoscroll cursor without swallowing the click.
+                if (e.button === 1 && !isParent && !file.isDir) e.preventDefault();
+            });
+
             div.addEventListener('contextmenu', (e) => {
                 e.preventDefault();
                 if (isParent) return;
@@ -1062,8 +1153,16 @@ function initApp() {
         },
         
         // Editor functions
-        async openFile(file) {
+        /**
+         * Opens a file in the editor.
+         *
+         * opts.background loads it and adds its tab without moving off
+         * whatever is on screen — what a middle click should do, and what
+         * "Open in new tab" always meant but never did.
+         */
+        async openFile(file, opts) {
             if (!file || file.isDir) return;
+            const background = !!(opts && opts.background);
 
             // Auto-save current file if enabled
             if (this.autoSave && this.activeFile && this.isFileModified(this.activeFile)) {
@@ -1079,7 +1178,7 @@ function initApp() {
 
             // Check if already open
             if (this.openFiles.has(filePath)) {
-                this.switchToFile(filePath);
+                if (!background) this.switchToFile(filePath);
                 return;
             }
 
@@ -1116,11 +1215,14 @@ function initApp() {
                 // Add tab
                 this.addEditorTab(filePath, file.name);
 
-                // Switch to file
-                this.switchToFile(filePath);
-
-                // Update file type
-                this.updateFileType(file.name);
+                if (!background) {
+                    this.switchToFile(filePath);
+                    this.updateFileType(file.name);
+                } else {
+                    // The tab is there and the content is loaded; the editor
+                    // stays on whatever was already open.
+                    window.UX.toast.show('Opened ' + file.name + ' in a tab', { duration: 1600 });
+                }
 
                 if (window.Session) window.Session.save();
 
@@ -1130,9 +1232,8 @@ function initApp() {
         },
         
         openInNewTab() {
-            if (this.selectedFile && !this.selectedFile.isDir) {
-                this.openFile(this.selectedFile);
-            }
+            const file = this.contextFile || this.selectedFile;
+            if (file && !file.isDir) this.openFile(file, { background: true });
         },
         
         addEditorTab(path, name) {
@@ -1579,6 +1680,9 @@ function initApp() {
 
         // File operations
         async refreshFiles() {
+            // A refresh means a refresh: drop the cached copy of this folder
+            // so the listing comes off the panel rather than out of memory.
+            this.dirCacheForget([this.currentPath]);
             await this.loadFiles(this.currentPath);
         },
         
@@ -1905,10 +2009,18 @@ function initApp() {
         async deletePaths(paths) {
             if (!paths || !paths.length) return;
 
+            // Planning walks the tree — one request per folder — so on a
+            // plugins directory this takes seconds. Without this, pressing
+            // Delete looked like nothing had happened.
+            const planning = window.UX.toast.show(
+                'Checking what would go from ' + paths.length + ' item(s)…', { duration: 120000 });
+
             let plan;
             try {
                 plan = await window.go.main.App.PlanDelete('', paths);
+                planning.dismiss();
             } catch (err) {
+                planning.dismiss();
                 await this.say('Cannot delete', String(err));
                 return;
             }
@@ -1938,8 +2050,12 @@ function initApp() {
                 if (!ok) return;
             }
 
+            const deleting = window.UX.toast.show(
+                'Copying to the recycle bin and deleting…', { duration: 600000 });
             try {
                 const outcome = await window.go.main.App.SafeDeleteFiles(plan.token);
+                deleting.dismiss();
+                this.dirCacheForget(plan.roots);
                 this.forgetOpenFilesUnder(plan.roots);
                 await this.refreshFiles();
 
@@ -1987,6 +2103,7 @@ function initApp() {
                         { action: undo });
                 }
             } catch (err) {
+                deleting.dismiss();
                 await this.say('Delete failed', String(err));
             }
         },
@@ -2269,11 +2386,42 @@ function initApp() {
         showContextMenu(event, file) {
             const menu = document.getElementById('contextMenu');
             if (!menu) return;
-            
-            menu.style.left = event.clientX + 'px';
-            menu.style.top = event.clientY + 'px';
-            menu.classList.add('show');
+
             this.contextFile = file;
+
+            // Only the entries that mean something for what was clicked. A
+            // folder cannot be opened in the editor, duplicated or extracted,
+            // and offering those put items in the menu that did nothing.
+            const isDir = !!(file && file.isDir);
+            menu.querySelectorAll('[data-files-only]').forEach(el => { el.hidden = isDir; });
+            menu.querySelectorAll('[data-dirs-only]').forEach(el => { el.hidden = !isDir; });
+
+            // body carries a CSS `zoom`, so the pointer's clientX/clientY are
+            // unzoomed viewport pixels while `left`/`top` inside the body are
+            // multiplied by that zoom again. At 110% the menu landed 10% down
+            // and right of the cursor.
+            const scale = (window.UX && window.UX.scale && window.UX.scale()) || 1;
+            let x = event.clientX / scale;
+            let y = event.clientY / scale;
+
+            // Measure before placing, so a menu near the edge opens inwards
+            // rather than off the window.
+            menu.classList.add('show');
+            const box = menu.getBoundingClientRect();
+            const limitX = window.innerWidth / scale;
+            const limitY = window.innerHeight / scale;
+            if (x + box.width / scale > limitX) x = Math.max(0, limitX - box.width / scale - 4);
+            if (y + box.height / scale > limitY) y = Math.max(0, limitY - box.height / scale - 4);
+
+            menu.style.left = x + 'px';
+            menu.style.top = y + 'px';
+        },
+
+        // "Open folder" from the context menu, for the entry that was clicked
+        // rather than whatever happens to be selected.
+        openContextFolder() {
+            const file = this.contextFile;
+            if (file && file.isDir) this.navigateTo(this.resolvePath(file));
         },
         
         // Console operations

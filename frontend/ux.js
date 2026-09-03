@@ -240,6 +240,7 @@
 
         overlay.classList.add('show');
         const input = $('paletteInput');
+        refreshAllServers();
         input.value = mode === 'servers' ? '>' : '';
         input.placeholder = mode === 'servers'
             ? 'Switch server — type to filter, ↑ ↓ to move, Enter to pick'
@@ -253,14 +254,34 @@
         if (overlay) overlay.classList.remove('show');
     }
 
+    // Every server on every configured panel. Ctrl+K used to read the active
+    // panel's dropdown only, so reaching a server on another panel meant
+    // switching panels by hand first.
+    let allServers = [];
+
+    function refreshAllServers() {
+        if (!(window.go && window.go.main && window.go.main.App.ListAllServers)) return;
+        window.go.main.App.ListAllServers().then((refs) => {
+            allServers = refs || [];
+            // The list arrives after the palette has drawn, so redraw it.
+            const overlay = $('palette');
+            if (overlay && overlay.classList.contains('show')) {
+                const input = $('paletteInput');
+                paletteBuild(input ? input.value : '');
+            }
+        }).catch(() => { /* one unreachable panel should not empty the list */ });
+    }
+
     function paletteSources() {
         const items = [];
 
         // Servers first: switching is the thing this is opened for most.
         const servers = $('serverDropdown');
+        const onThisPanel = new Set();
         if (servers) {
             Array.from(servers.options).forEach((opt) => {
                 if (!opt.value) return;
+                onThisPanel.add(opt.value);
                 items.push({
                     kind: 'server',
                     icon: 'server',
@@ -274,6 +295,19 @@
                 });
             });
         }
+
+        // Then everything on the other panels. SwitchServer moves to the
+        // right panel first, so picking one from here just works.
+        allServers.forEach((ref) => {
+            if (!ref || !ref.id || onThisPanel.has(ref.id)) return;
+            items.push({
+                kind: 'server',
+                icon: 'server',
+                label: (ref.name || ref.id) + ' · ' + (ref.panel || ''),
+                hint: ref.id,
+                run: () => window.app && window.app.switchServer(ref.id)
+            });
+        });
 
         const panels = $('panelDropdown');
         if (panels) {
@@ -541,6 +575,11 @@
         zoomIn: () => nudgeZoom(1),
         zoomOut: () => nudgeZoom(-1),
         zoomReset: resetZoom,
+        // body carries a CSS `zoom`, so a pointer event's clientX/clientY are
+        // in unzoomed viewport pixels while anything positioned inside the body
+        // is measured in zoomed ones. Anything placing an element at a pointer
+        // has to divide by this.
+        scale: () => ZOOM_STEPS[zoomIndex],
         refreshBindings: loadBindings
     };
 

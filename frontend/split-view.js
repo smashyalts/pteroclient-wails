@@ -667,13 +667,18 @@
 
     function open() {
         const manager = document.querySelector('.file-manager');
-        const tree = document.querySelector('.file-tree');
+        // The whole pane, not just the tree inside it. Hiding only .file-tree
+        // left the pane's filter bar and its resize grip on screen next to the
+        // two workspaces, so the window appeared to have three explorers.
+        const pane = document.querySelector('.file-manager > .file-pane');
+        const grip = document.getElementById('fileGrip');
         const editor = document.querySelector('.editor-container');
         if (!manager || !editor) return;
 
         loadLayout();
 
-        tree.style.display = 'none';
+        if (pane) pane.style.display = 'none';
+        if (grip) grip.style.display = 'none';
         editor.style.display = 'none';
         manager.classList.add('split-active');
 
@@ -735,10 +740,12 @@
         if (root) root.remove();
 
         const manager = document.querySelector('.file-manager');
-        const tree = document.querySelector('.file-tree');
+        const pane = document.querySelector('.file-manager > .file-pane');
+        const grip = document.getElementById('fileGrip');
         const editor = document.querySelector('.editor-container');
         if (manager) manager.classList.remove('split-active');
-        if (tree) tree.style.display = '';
+        if (pane) pane.style.display = '';
+        if (grip) grip.style.display = '';
         if (editor) editor.style.display = '';
 
         const btn = $('splitViewBtn');
