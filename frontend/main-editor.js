@@ -1880,6 +1880,14 @@ function initApp() {
                         outcome.failed.join('\n'));
                 }
 
+                // Files written into a selected folder after the preview was
+                // taken. They were copied and deleted like the rest, but they
+                // were never on the list the dialog showed.
+                if (outcome.appeared && outcome.appeared.length) {
+                    window.UX.toast.warn(
+                        outcome.appeared.length + ' file(s) appeared after the preview and went too');
+                }
+
                 if (outcome.skipped && outcome.skipped.length) {
                     window.UX.toast.warn(
                         outcome.captured + ' in the recycle bin, ' + outcome.skipped.length +

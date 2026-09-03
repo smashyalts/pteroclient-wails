@@ -238,15 +238,16 @@ func (a *App) refreshServerMappingsLocked() {
 	a.serverPanelMap = make(map[string]string)
 
 	for _, panel := range a.config.GetPanels() {
-		// Create temporary clients for each panel
-		panelURL := panel.PanelURL
-		if !strings.HasPrefix(panelURL, "http://") && !strings.HasPrefix(panelURL, "https://") {
-			panelURL = "https://" + panelURL
+		// The cached client, not a fresh one. Building one probes the panel to
+		// find out whether its key is an admin key, and this paid for that on
+		// every refresh and then leaked the client's connections.
+		client, clientErr := a.clientFor(panel.Name)
+		if clientErr != nil {
+			continue
 		}
 
 		// Use the panel's primary API key (which auto-detects if it's admin or client)
-		tmpClient := pterodactyl.NewClient(panelURL, panel.APIKey, "")
-		servers, err := tmpClient.ListServers()
+		servers, err := client.ListServers()
 		if err == nil {
 			// Map all servers from this panel
 			for _, s := range servers {

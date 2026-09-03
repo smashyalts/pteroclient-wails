@@ -993,6 +993,9 @@ type DeleteOutcome struct {
 	Captured int      `json:"captured"`
 	Skipped  []string `json:"skipped"`
 	Failed   []string `json:"failed"`
+	// Appeared names files that were not in the preview because they were
+	// written after it. They are captured and deleted like the rest.
+	Appeared []string `json:"appeared"`
 	Batch    string   `json:"batch"`
 	BinUsed  int64    `json:"bin_used"`
 	BinLimit int64    `json:"bin_limit"`
@@ -1027,9 +1030,10 @@ func (a *App) SafeDeleteFiles(token string) (*DeleteOutcome, error) {
 	defer a.fileMu.Unlock()
 
 	outcome := &DeleteOutcome{
-		Deleted: []string{},
-		Skipped: []string{},
-		Failed:  []string{},
+		Deleted:  []string{},
+		Skipped:  []string{},
+		Failed:   []string{},
+		Appeared: []string{},
 	}
 
 	// One id for the whole operation, so a folder that deleted into 200 bin
@@ -1075,6 +1079,34 @@ func (a *App) SafeDeleteFiles(token string) (*DeleteOutcome, error) {
 
 			if isDir := !found.IsFile && !found.IsSymlink; isDir != wasDirOf[root] {
 				return fmt.Errorf("%s changed between the preview and now — nothing was deleted; refresh and try again", root)
+			}
+		}
+
+		// The plan is a snapshot, and a running server keeps writing. Re-walk
+		// every directory root now: a log line or a world region written
+		// between the dialog opening and Delete being pressed would otherwise
+		// go with the folder having never been copied, and nothing would say
+		// so. Anything new joins the plan's items, so the capture below treats
+		// it like the rest.
+		planned := map[string]bool{}
+		for _, item := range plan.Items {
+			planned[item.Path] = true
+		}
+		for _, root := range plan.Roots {
+			if !wasDirOf[root] {
+				continue
+			}
+			fresh := &DeletePlan{Items: []DeleteItem{}, Warnings: []string{}, Critical: []string{}}
+			if walkErr := a.walkForDelete(c, root, 1, fresh); walkErr != nil {
+				return walkErr
+			}
+			for _, item := range fresh.Items {
+				if item.IsDir || planned[item.Path] {
+					continue
+				}
+				planned[item.Path] = true
+				plan.Items = append(plan.Items, item)
+				outcome.Appeared = append(outcome.Appeared, item.Path)
 			}
 		}
 
