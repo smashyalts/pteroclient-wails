@@ -103,11 +103,12 @@
             '    <span class="ws-focus" title="The focused workspace takes the keyboard"></span>' +
             '    <select data-role="server" class="ws-server"><option value="">Choose a server…</option></select>' +
             '    <span class="spacer"></span>' +
+            '    <button class="sm icon-only" data-role="wsrefresh" title="Refresh this folder"></button>' +
             '    <button class="sm icon-only" data-role="wslayout" title="Explorer beside / below the editor"></button>' +
             '  </header>' +
             '  <div class="ws-body">' +
             '    <div class="ws-explorer">' +
-            '      <div class="ws-path mono" data-role="path">/</div>' +
+            '      <div class="ws-path path-bar" data-role="path"></div>' +
             '      <div class="filter-bar sm"><input type="text" data-role="filter" autocomplete="off" ' +
             '        spellcheck="false" placeholder="Filter…"></div>' +
             '      <div class="ws-list" data-role="list"></div>' +
@@ -165,6 +166,107 @@
         });
     }
 
+    /**
+     * The path, as something you can click.
+     *
+     * The main explorer has had this since the beginning; the split view
+     * printed the same path as plain text, so the only way back up a tree was
+     * the .. row, one level at a time.
+     */
+    function renderCrumbs(side, path) {
+        const bar = el(side, '[data-role="path"]');
+        if (!bar) return;
+
+        const st = space(side);
+        const parts = String(path || '/').split('/').filter(Boolean);
+
+        let html = '';
+        if (st.panel) html += '<span class="crumb-panel">' + esc(st.panel) + '</span>';
+        html += '<span class="crumb" data-path="/">container</span>';
+
+        let acc = '';
+        parts.forEach((part, i) => {
+            acc += '/' + part;
+            const last = i === parts.length - 1;
+            html += '<span class="crumb-sep">/</span>' +
+                '<span class="crumb' + (last ? ' current' : '') + '" data-path="' +
+                esc(acc) + '">' + esc(part) + '</span>';
+        });
+
+        bar.innerHTML = html;
+    }
+
+    /**
+     * The right-click menu for a workspace.
+     *
+     * Its own rather than the main explorer's: that one is driven by window.app
+     * and acts on window.app's selection, so pointing it at a workspace would
+     * have meant it acting on the wrong pane's files.
+     */
+    function showMenu(event, side, entry) {
+        closeMenu();
+
+        const menu = document.createElement('div');
+        menu.className = 'context-menu show ws-menu';
+        menu.id = 'wsContextMenu';
+
+        const items = [];
+        if (!entry.isDir) {
+            items.push(['open', 'Open']);
+        } else {
+            items.push(['open', 'Open folder']);
+        }
+        items.push(['copy', 'Copy path']);
+        items.push(['refresh', 'Refresh']);
+
+        menu.innerHTML = items.map(function (item) {
+            return '<div class="context-item" data-act="' + item[0] + '">' + esc(item[1]) + '</div>';
+        }).join('');
+
+        document.body.appendChild(menu);
+
+        // Placed so it opens inwards rather than off the edge.
+        const box = menu.getBoundingClientRect();
+        const x = Math.min(event.clientX, window.innerWidth - box.width - 8);
+        const y = Math.min(event.clientY, window.innerHeight - box.height - 8);
+        menu.style.left = Math.max(4, x) + 'px';
+        menu.style.top = Math.max(4, y) + 'px';
+
+        menu.addEventListener('click', async (e) => {
+            const act = e.target.closest('.context-item');
+            if (!act) return;
+            closeMenu();
+
+            switch (act.dataset.act) {
+                case 'open':
+                    if (entry.isDir) browse(side, entry.path);
+                    else openFile(side, entry.name);
+                    break;
+                case 'copy':
+                    try {
+                        await navigator.clipboard.writeText(entry.path);
+                        window.UX.toast.ok('Path copied');
+                    } catch (err) {
+                        window.UX.toast.warn(entry.path);
+                    }
+                    break;
+                case 'refresh':
+                    browse(side);
+                    break;
+            }
+        });
+    }
+
+    function closeMenu() {
+        const open = document.getElementById('wsContextMenu');
+        if (open) open.remove();
+    }
+
+    document.addEventListener('click', closeMenu);
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeMenu();
+    });
+
     /* ------------------------------------------------------------ explorer */
 
     function el(side, selector) {
@@ -179,13 +281,13 @@
         if (!list) return;
 
         if (!st.serverID) {
-            crumb.textContent = '/';
+            renderCrumbs(side, '/');
             list.innerHTML = '<div class="preview-empty">Pick a server</div>';
             return;
         }
 
         const target = path === undefined ? (st.path || '/') : path;
-        crumb.textContent = (st.panel ? st.panel + ' · ' : '') + target;
+        renderCrumbs(side, target);
         list.innerHTML = '<div class="loading">' + icon('refresh', 'spin') + '</div>';
 
         let files;
@@ -493,6 +595,15 @@
     async function setServer(side, id, name, panel) {
         const st = space(side);
 
+        // A workspace being pointed at a server for the first time starts
+        // where the other one is looking, rather than at the root. Two servers
+        // on one host usually share a layout, and comparing the same folder on
+        // both is most of what a split view is for.
+        if (!st.serverID && (!st.path || st.path === '/')) {
+            const other = space(side === 'left' ? 'right' : 'left');
+            if (other.serverID && other.path && other.path !== '/') st.path = other.path;
+        }
+
         const dirty = Array.from(st.tabs.values()).some(t => t.dirty);
         if (dirty) {
             const ok = await window.Shell.dialog.confirm('Unsaved changes',
@@ -729,6 +840,9 @@
         root.querySelectorAll('[data-role="wslayout"]').forEach((btn) => {
             btn.innerHTML = window.Icons.svg('layout');
         });
+        root.querySelectorAll('[data-role="wsrefresh"]').forEach((btn) => {
+            btn.innerHTML = window.Icons.svg('refresh');
+        });
 
         applyLayout();
         wireDragAndDrop(root);
@@ -814,6 +928,45 @@
         if (innerGrip) return dragInner(innerGrip.dataset.innergrip, e);
     });
 
+    // A crumb, in either workspace.
+    document.addEventListener('click', (e) => {
+        if (!active) return;
+        const crumb = e.target.closest('#splitRoot .ws-path .crumb');
+        if (!crumb || crumb.classList.contains('current')) return;
+        const ws = crumb.closest('.ws');
+        if (!ws) return;
+        browse(ws.getAttribute('data-side'), crumb.getAttribute('data-path'));
+    });
+
+    /**
+     * Right-click in a workspace.
+     *
+     * The main explorer's menu is driven by window.app and acts on its own
+     * selection, so it cannot be reused as it stands. This is the same menu
+     * with the actions that make sense here, pointed at the workspace the click
+     * happened in.
+     */
+    document.addEventListener('contextmenu', (e) => {
+        if (!active) return;
+        const row = e.target.closest('#splitRoot .ws-list .file-item');
+        if (!row) return;
+
+        e.preventDefault();
+        const ws = row.closest('.ws');
+        if (!ws) return;
+
+        const side = ws.getAttribute('data-side');
+        if (side !== focused) setFocus(side);
+
+        const st = space(side);
+        const name = row.dataset.name;
+        if (!name || row.dataset.updir) return;
+
+        const isDir = !!row.dataset.dir;
+        const full = st.path === '/' ? '/' + name : st.path + '/' + name;
+        showMenu(e, side, { name: name, path: full, isDir: isDir });
+    });
+
     document.addEventListener('click', async (e) => {
         if (e.target.closest('#splitViewBtn')) {
             e.preventDefault();
@@ -828,6 +981,7 @@
 
         const btn = e.target.closest('button');
         if (btn && btn.dataset.role === 'save') return save(side);
+        if (btn && btn.dataset.role === 'wsrefresh') return browse(side);
         if (btn && btn.dataset.role === 'wslayout') {
             const st = space(side);
             st.layout = st.layout === 'side' ? 'stacked' : 'side';

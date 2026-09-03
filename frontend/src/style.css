@@ -2467,6 +2467,43 @@ body.console-window .logo-sub::after { content: " · console"; }
 
 /* A two-click confirm, armed. It has to look different from the resting
    state or the second click is a guess. */
+/* The workspace breadcrumb. Same crumbs as the main explorer, sized for a
+   narrower pane, with the panel name in front of them. */
+.ws-path.path-bar {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+    direction: ltr;
+}
+
+.ws-path.path-bar::-webkit-scrollbar { display: none; }
+
+.ws-path .crumb-panel {
+    flex: none;
+    margin-right: 5px;
+    padding: 1px 6px;
+    border-radius: var(--radius-pill);
+    background: var(--bg-hover);
+    color: var(--text-dim);
+    font-size: 10.5px;
+}
+
+.ws-path .crumb {
+    flex: none;
+    padding: 1px 4px;
+    border-radius: 4px;
+    cursor: pointer;
+    color: var(--text-secondary);
+}
+
+.ws-path .crumb:hover { background: var(--bg-hover); color: var(--text-primary); }
+.ws-path .crumb.current { color: var(--text-primary); cursor: default; }
+.ws-path .crumb.current:hover { background: none; }
+.ws-path .crumb-sep { flex: none; color: var(--text-faint); }
+
 /* ========================================================================
    Transfer view
    ------------------------------------------------------------------------
