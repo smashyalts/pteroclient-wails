@@ -16,11 +16,11 @@ import (
 
 // App struct
 type App struct {
-	ctx          context.Context
-	config       *config.MultiConfigManager
-	client       *pterodactyl.Client       // Client API for file operations
-	adminClient  *pterodactyl.Client       // Admin API for server listing (optional)
-	consoleWS    *pterodactyl.ConsoleWebSocket
+	ctx            context.Context
+	config         *config.MultiConfigManager
+	client         *pterodactyl.Client // Client API for file operations
+	adminClient    *pterodactyl.Client // Admin API for server listing (optional)
+	consoleWS      *pterodactyl.ConsoleWebSocket
 	serverPanelMap map[string]string // Maps server ID to panel name
 
 	// Local safety net. store holds the pre-write copies and the recycle bin;
@@ -31,11 +31,25 @@ type App struct {
 	planMu      sync.Mutex
 	deletePlans map[string]*DeletePlan
 
+	// One client per panel, so browsing another panel does not rebuild one —
+	// and re-probe whether its key is an admin key — on every call. The
+	// generation is bumped whenever credentials change; see invalidateClients.
+	clientMu  sync.Mutex
+	clients   map[string]*cachedClient
+	clientGen int
+
 	// Set when this process was launched as a console window rather than the
 	// main app. See main.go and OpenConsoleWindow.
 	consoleOnly      bool
 	consoleServerID  string
 	consolePanelName string
+}
+
+// cachedClient is one panel's client and the config generation it was built
+// against.
+type cachedClient struct {
+	client *pterodactyl.Client
+	gen    int
 }
 
 // NewApp creates a new App application struct
@@ -61,7 +75,7 @@ func (a *App) startup(ctx context.Context) {
 	} else {
 		runtime.LogError(a.ctx, "Failed to locate the home directory: "+homeErr.Error())
 	}
-	
+
 	// Initialize multi-panel config
 	var err error
 	a.config, err = config.NewMultiConfigManager()
@@ -69,7 +83,7 @@ func (a *App) startup(ctx context.Context) {
 		runtime.LogError(a.ctx, "Failed to initialize config: "+err.Error())
 		return
 	}
-	
+
 	// A console window was told which panel and server it is for; switching
 	// before the first connect saves it connecting twice.
 	if a.consoleOnly && a.consolePanelName != "" {
@@ -95,36 +109,36 @@ func (a *App) Connect() error {
 	if panel == nil {
 		return fmt.Errorf("no active panel")
 	}
-	
+
 	// Validate panel URL
 	if panel.PanelURL == "" {
 		return fmt.Errorf("panel URL is empty")
 	}
-	
+
 	// Ensure URL has protocol
 	panelURL := panel.PanelURL
 	if !strings.HasPrefix(panelURL, "http://") && !strings.HasPrefix(panelURL, "https://") {
 		// Default to https if no protocol specified
 		panelURL = "https://" + panelURL
 	}
-	
+
 	// Log for debugging (only if context is set)
 	if a.ctx != nil {
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[CONNECT] Connecting to panel: %s (Name: %s)", panelURL, panel.Name))
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[CONNECT] API Key: %s...%s", panel.APIKey[:8], panel.APIKey[len(panel.APIKey)-4:]))
 	}
-	
+
 	// Create client with empty server ID initially if not set
 	serverID := panel.ServerID
 	if serverID == "" {
 		// Use empty string, will need to select server from dropdown
 		serverID = ""
 	}
-	
+
 	if a.ctx != nil {
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[CONNECT] Server ID: %s", serverID))
 	}
-	
+
 	// Close existing clients to release connections
 	if a.client != nil {
 		if a.ctx != nil {
@@ -140,7 +154,7 @@ func (a *App) Connect() error {
 		a.adminClient.Close()
 		a.adminClient = nil
 	}
-	
+
 	// Create new client API client (for file operations). Replacing the client
 	// wholesale is the most disruptive thing that can happen to an in-flight
 	// file operation, so it waits for one to finish.
@@ -150,14 +164,14 @@ func (a *App) Connect() error {
 	a.fileMu.Lock()
 	a.client = pterodactyl.NewClient(panelURL, panel.APIKey, serverID)
 	a.fileMu.Unlock()
-	
+
 	// Create admin API client if admin key is provided (for listing all servers)
 	if panel.AdminKey != "" {
 		a.adminClient = pterodactyl.NewClient(panelURL, panel.AdminKey, "")
 	} else {
 		a.adminClient = nil
 	}
-	
+
 	// If no server ID, just test API connection without server-specific call
 	if serverID != "" {
 		// Test connection to specific server
@@ -172,7 +186,7 @@ func (a *App) Connect() error {
 			return fmt.Errorf("API connection failed: %v", err)
 		}
 	}
-	
+
 	if a.ctx != nil {
 		runtime.EventsEmit(a.ctx, "connected", true)
 	}
@@ -183,14 +197,14 @@ func (a *App) Connect() error {
 func (a *App) RefreshAllServerMappings() {
 	// Clear existing mappings to avoid stale entries
 	a.serverPanelMap = make(map[string]string)
-	
+
 	for _, panel := range a.config.GetPanels() {
 		// Create temporary clients for each panel
 		panelURL := panel.PanelURL
 		if !strings.HasPrefix(panelURL, "http://") && !strings.HasPrefix(panelURL, "https://") {
 			panelURL = "https://" + panelURL
 		}
-		
+
 		// Use the panel's primary API key (which auto-detects if it's admin or client)
 		tmpClient := pterodactyl.NewClient(panelURL, panel.APIKey, "")
 		servers, err := tmpClient.ListServers()
@@ -208,11 +222,11 @@ func (a *App) ListServers() ([]map[string]interface{}, error) {
 	if a.client == nil {
 		return nil, fmt.Errorf("not connected")
 	}
-	
+
 	// Use admin client if available, otherwise use regular client
 	var servers []pterodactyl.ServerInfo
 	var err error
-	
+
 	if a.adminClient != nil {
 		// Use admin API to list all servers
 		servers, err = a.adminClient.ListServers()
@@ -220,17 +234,17 @@ func (a *App) ListServers() ([]map[string]interface{}, error) {
 		// Use client API to list user's servers
 		servers, err = a.client.ListServers()
 	}
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Map servers to the current panel
 	currentPanel := a.config.GetActivePanelName()
 	for _, s := range servers {
 		a.serverPanelMap[s.ID] = currentPanel
 	}
-	
+
 	result := make([]map[string]interface{}, len(servers))
 	for i, s := range servers {
 		result[i] = map[string]interface{}{
@@ -242,7 +256,7 @@ func (a *App) ListServers() ([]map[string]interface{}, error) {
 			"isAdmin":     a.adminClient != nil && a.adminClient.IsAdmin(),
 		}
 	}
-	
+
 	return result, nil
 }
 
@@ -251,13 +265,13 @@ func (a *App) SwitchServer(serverID string) error {
 	if a.client == nil {
 		return fmt.Errorf("not connected")
 	}
-	
+
 	// Disconnect console if connected
 	if a.consoleWS != nil && a.consoleWS.IsConnected() {
 		a.consoleWS.Close()
 		runtime.EventsEmit(a.ctx, "console-connected", false)
 	}
-	
+
 	// Check if we're switching to a server on a different panel
 	if panelName, ok := a.serverPanelMap[serverID]; ok {
 		if panelName != a.config.GetActivePanelName() {
@@ -267,7 +281,7 @@ func (a *App) SwitchServer(serverID string) error {
 			}
 		}
 	}
-	
+
 	// Update client server ID. Under fileMu: switching servers out from under
 	// an in-flight save is the same hazard as browsing during one.
 	a.fileMu.Lock()
@@ -276,16 +290,16 @@ func (a *App) SwitchServer(serverID string) error {
 
 	// Update config for active panel
 	a.config.UpdateActivePanelServer(serverID)
-	
+
 	// Test connection to new server
 	_, err := a.client.GetServerState()
 	if err != nil {
 		return fmt.Errorf("failed to connect to server: %v", err)
 	}
-	
+
 	// Emit server changed event
 	runtime.EventsEmit(a.ctx, "server-changed", serverID)
-	
+
 	return nil
 }
 
@@ -410,7 +424,7 @@ func (a *App) SetActivePanel(panelName string) error {
 func (a *App) GetPanels() []map[string]interface{} {
 	panels := a.config.GetPanels()
 	result := make([]map[string]interface{}, len(panels))
-	
+
 	for i, p := range panels {
 		result[i] = map[string]interface{}{
 			"name":     p.Name,
@@ -421,7 +435,7 @@ func (a *App) GetPanels() []map[string]interface{} {
 			"hasAdminKey": p.AdminKey != "",
 		}
 	}
-	
+
 	return result
 }
 
@@ -435,7 +449,7 @@ func (a *App) SwitchPanel(panelName string) error {
 	if a.ctx != nil {
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[SWITCH_PANEL] Switching from %s to %s", a.config.GetActivePanelName(), panelName))
 	}
-	
+
 	// Disconnect console if connected
 	if a.consoleWS != nil && a.consoleWS.IsConnected() {
 		a.consoleWS.Close()
@@ -443,7 +457,9 @@ func (a *App) SwitchPanel(panelName string) error {
 			runtime.EventsEmit(a.ctx, "console-connected", false)
 		}
 	}
-	
+
+	a.invalidateClients()
+
 	// Set the active panel
 	if err := a.config.SetActivePanel(panelName); err != nil {
 		if a.ctx != nil {
@@ -451,11 +467,11 @@ func (a *App) SwitchPanel(panelName string) error {
 		}
 		return err
 	}
-	
+
 	if a.ctx != nil {
 		runtime.LogInfo(a.ctx, "[SWITCH_PANEL] Active panel set, reconnecting...")
 	}
-	
+
 	// Reconnect with new panel
 	if err := a.Connect(); err != nil {
 		if a.ctx != nil {
@@ -463,23 +479,23 @@ func (a *App) SwitchPanel(panelName string) error {
 		}
 		return err
 	}
-	
+
 	if a.ctx != nil {
 		runtime.LogInfo(a.ctx, "[SWITCH_PANEL] Connected, refreshing server mappings...")
 	}
-	
+
 	// Refresh server mappings for all panels
 	a.RefreshAllServerMappings()
-	
+
 	if a.ctx != nil {
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[SWITCH_PANEL] Switch complete. Client state - URL: %s, ServerID: %s", a.client.GetBaseURL(), a.client.GetServerID()))
 	}
-	
+
 	// Emit panel changed event
 	if a.ctx != nil {
 		runtime.EventsEmit(a.ctx, "panel-changed", panelName)
 	}
-	
+
 	return nil
 }
 
@@ -521,6 +537,9 @@ func (a *App) AddPanel(name, panelURL, apiKey, adminKey string) error {
 		return err
 	}
 
+	// Credentials may have changed; nothing may be served from the cache.
+	a.invalidateClients()
+
 	// Only the active panel drives the connection. Adding a second panel must
 	// not drag the app off the one it is already working on.
 	if a.config.GetActivePanelName() != name {
@@ -543,6 +562,7 @@ func (a *App) ClearPanelAdminKey(name string) error {
 	if err := a.config.ClearAdminKey(name); err != nil {
 		return err
 	}
+	a.invalidateClients()
 	if a.config.GetActivePanelName() != name {
 		return nil
 	}
@@ -560,7 +580,7 @@ func (a *App) RemovePanel(name string) error {
 	if len(panels) <= 1 {
 		return fmt.Errorf("cannot remove the last panel")
 	}
-	
+
 	// If removing active panel, switch to another first
 	if a.config.GetActivePanelName() == name {
 		for _, p := range panels {
@@ -570,8 +590,14 @@ func (a *App) RemovePanel(name string) error {
 			}
 		}
 	}
-	
-	return a.config.RemovePanel(name)
+
+	if err := a.config.RemovePanel(name); err != nil {
+		return err
+	}
+	// After the config, not before: until the panel is gone, clientFor could
+	// still find it and rebuild the client this was meant to drop.
+	a.invalidateClients()
+	return nil
 }
 
 // GetConfig returns current config
@@ -591,12 +617,12 @@ func (a *App) SaveConfig(panelURL, apiKey, serverID string) error {
 		APIKey:   apiKey,
 		ServerID: serverID,
 	}
-	
+
 	a.config.SetConfig(cfg)
 	if err := a.config.Save(); err != nil {
 		return err
 	}
-	
+
 	// Reconnect with new config
 	return a.Connect()
 }
@@ -606,12 +632,12 @@ func (a *App) GetServerState() (string, error) {
 	if a.client == nil {
 		return "disconnected", nil
 	}
-	
+
 	state, err := a.client.GetServerState()
 	if err != nil {
 		return "error", err
 	}
-	
+
 	return state, nil
 }
 
@@ -620,7 +646,7 @@ func (a *App) SetPowerState(signal string) error {
 	if a.client == nil {
 		return fmt.Errorf("not connected")
 	}
-	
+
 	return a.client.SetPowerState(signal)
 }
 
@@ -629,7 +655,7 @@ func (a *App) SendCommand(command string) error {
 	if a.consoleWS == nil || !a.consoleWS.IsConnected() {
 		return fmt.Errorf("console not connected")
 	}
-	
+
 	return a.consoleWS.SendCommand(command)
 }
 
@@ -638,42 +664,42 @@ func (a *App) ConnectConsole() error {
 	if a.client == nil {
 		return fmt.Errorf("not connected to server")
 	}
-	
+
 	// Get WebSocket credentials
 	creds, err := a.client.GetWebSocketCredentials()
 	if err != nil {
 		return fmt.Errorf("failed to get WebSocket credentials: %v", err)
 	}
-	
-// Create WebSocket with origin
+
+	// Create WebSocket with origin
 	cfg := a.config.GetConfig()
 	panelOrigin := strings.TrimSuffix(cfg.PanelURL, "/")
-	
+
 	a.consoleWS = pterodactyl.NewConsoleWebSocketWithOrigin(
 		creds.Socket, creds.Token, cfg.ServerID, panelOrigin,
 	)
-	
+
 	// Set up message handler
 	a.consoleWS.OnOutput = func(message string) {
 		// Send raw ANSI text; frontend will render colors
 		runtime.EventsEmit(a.ctx, "console-output", message)
 	}
-	
+
 	a.consoleWS.OnError = func(err error) {
 		runtime.EventsEmit(a.ctx, "console-error", err.Error())
 	}
-	
+
 	// Connect
 	err = a.consoleWS.Connect()
 	if err != nil {
 		return fmt.Errorf("failed to connect: %v", err)
 	}
-	
+
 	// Request initial logs
 	if err := a.consoleWS.RequestLogs(); err != nil {
 		runtime.EventsEmit(a.ctx, "console-error", "failed to request logs: "+err.Error())
 	}
-	
+
 	runtime.EventsEmit(a.ctx, "console-connected", true)
 	return nil
 }
@@ -691,13 +717,13 @@ func (a *App) ListFiles(path string) ([]map[string]interface{}, error) {
 	if a.client == nil {
 		return nil, fmt.Errorf("not connected")
 	}
-	
+
 	if a.ctx != nil {
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[LIST_FILES] Called with path: %s", path))
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[LIST_FILES] Current client state - URL: %s, ServerID: %s", a.client.GetBaseURL(), a.client.GetServerID()))
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[LIST_FILES] Active panel: %s", a.config.GetActivePanelName()))
 	}
-	
+
 	// Under fileMu so the listing cannot read a client that a save has
 	// temporarily aimed at another server.
 	a.fileMu.Lock()
@@ -719,13 +745,13 @@ func (a *App) GetFileContent(path string) (string, error) {
 	if a.client == nil {
 		return "", fmt.Errorf("not connected")
 	}
-	
+
 	if a.ctx != nil {
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[GET_FILE] Called with path: %s", path))
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[GET_FILE] Current client state - URL: %s, ServerID: %s", a.client.GetBaseURL(), a.client.GetServerID()))
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[GET_FILE] Active panel: %s", a.config.GetActivePanelName()))
 	}
-	
+
 	a.fileMu.Lock()
 	content, err := a.client.GetFileContent(path)
 	a.fileMu.Unlock()
@@ -736,11 +762,11 @@ func (a *App) GetFileContent(path string) (string, error) {
 		}
 		return "", err
 	}
-	
+
 	if a.ctx != nil {
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[GET_FILE] Successfully retrieved file (length: %d)", len(content)))
 	}
-	
+
 	return content, nil
 }
 

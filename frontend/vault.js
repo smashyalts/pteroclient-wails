@@ -119,6 +119,15 @@
 
         let html = '';
 
+        /* ---- an index the store could not read ---- */
+        if (stats.warning) {
+            html += '<div class="card card-pad" style="margin-bottom:12px;' +
+                'border-color:var(--danger);background:rgba(239,68,68,.09)">' +
+                '<div class="eyebrow" style="color:var(--danger-text)">Some copies are no longer tracked</div>' +
+                '<div style="margin-top:7px;font-size:12.5px;line-height:1.55">' +
+                esc(stats.warning) + '</div></div>';
+        }
+
         /* ---- header ---- */
         html += '<div class="card card-pad" style="margin-bottom:12px">' +
             '<div class="eyebrow">Local store</div>' +

@@ -110,6 +110,10 @@ type Store struct {
 
 	settingsPath string
 
+	// Set when an index could not be parsed and was moved aside, so the UI can
+	// say that the store lost track of what is on disk.
+	orphaned map[Kind]string
+
 	seq uint64
 }
 
@@ -135,6 +139,7 @@ func New(root string) (*Store, error) {
 		dirs:         map[Kind]string{KindVersion: filepath.Join(root, "versions"), KindBin: filepath.Join(root, "bin")},
 		files:        map[Kind]string{KindVersion: filepath.Join(root, "versions", "index.json"), KindBin: filepath.Join(root, "bin", "index.json")},
 		data:         map[Kind]*index{},
+		orphaned:     map[Kind]string{},
 		settingsPath: filepath.Join(root, "store-settings.json"),
 	}
 
@@ -179,6 +184,14 @@ func (s *Store) saveSettingsLocked() {
 
 // Root returns the directory the store lives in, for display.
 func (s *Store) Root() string { return s.root }
+
+// Orphaned reports an index that could not be read, and where it was put. The
+// blobs it described are still on disk but no longer tracked.
+func (s *Store) Orphaned(kind Kind) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.orphaned[kind]
+}
 
 // SetLimit overrides a store's byte cap. A value <= 0 restores the default.
 func (s *Store) SetLimit(kind Kind, limit int64) {
@@ -511,8 +524,15 @@ func (s *Store) loadIndex(kind Kind) *index {
 		return idx
 	}
 	if err := json.Unmarshal(raw, idx); err != nil {
-		// A corrupt index must not take the app down, and must not make the
-		// blobs look deletable either — they are left on disk untracked.
+		// A corrupt index must not take the app down. Starting fresh would
+		// leave every blob on disk untracked and unreclaimable, so the broken
+		// file is moved aside where it can be seen and recovered from rather
+		// than silently replaced.
+		aside := s.files[kind] + ".corrupt"
+		if renameErr := os.Rename(s.files[kind], aside); renameErr != nil {
+			_ = os.Remove(s.files[kind])
+		}
+		s.orphaned[kind] = aside
 		return &index{Version: 1}
 	}
 

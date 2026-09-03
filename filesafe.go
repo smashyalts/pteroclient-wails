@@ -147,14 +147,16 @@ var criticalDirs = map[string]string{
 	"backups":       "on-server backups",
 }
 
-var sensitiveExts = map[string]string{
-	".jar":     "a server or plugin binary",
-	".db":      "a database",
-	".sqlite":  "a database",
-	".sqlite3": "a database",
-	".mv.db":   "a database",
-	".key":     "a key file",
-	".pem":     "a key file",
+// Ordered, longest first: map iteration is random in Go, so two matching
+// suffixes gave a different reason from one run to the next.
+var sensitiveExts = []struct{ Ext, Why string }{
+	{".sqlite3", "a database"},
+	{".sqlite", "a database"},
+	{".mv.db", "a database"},
+	{".jar", "a server or plugin binary"},
+	{".key", "a key file"},
+	{".pem", "a key file"},
+	{".db", "a database"},
 }
 
 // classifyPath reports how carefully a path should be treated.
@@ -171,9 +173,9 @@ func classifyPath(p string, isDir bool) (level, reason string) {
 	if why, ok := criticalNames[base]; ok {
 		return ProtectCritical, why
 	}
-	for ext, why := range sensitiveExts {
-		if strings.HasSuffix(base, ext) {
-			return ProtectSensitive, why
+	for _, entry := range sensitiveExts {
+		if strings.HasSuffix(base, entry.Ext) {
+			return ProtectSensitive, entry.Why
 		}
 	}
 	return ProtectNone, ""
@@ -216,6 +218,46 @@ func (a *App) withServerClient(serverID string, fn func(c *pterodactyl.Client, p
 		return fn(a.client, panelName)
 	}
 
+	// Cached per panel; the caller holds fileMu, so pointing it at this
+	// server for the duration is safe the same way it is for the active one.
+	other, err := a.clientFor(panelName)
+	if err != nil {
+		return err
+	}
+	previous := other.GetServerID()
+	other.SetServerID(serverID)
+	defer other.SetServerID(previous)
+	return fn(other, panelName)
+}
+
+// dedicatedClient builds a client nobody else holds, for work too long to keep
+// fileMu for. It costs one construction; the caller owns it and closes it.
+func (a *App) dedicatedClient(serverID string) (*pterodactyl.Client, string, error) {
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+
+	if a.client == nil {
+		return nil, "", errors.New("not connected")
+	}
+	if serverID == "" {
+		serverID = a.client.GetServerID()
+	}
+	if serverID == "" {
+		return nil, "", errors.New("no server selected")
+	}
+
+	if a.serverPanelMap == nil {
+		a.serverPanelMap = make(map[string]string)
+	}
+	panelName, ok := a.serverPanelMap[serverID]
+	if !ok {
+		a.RefreshAllServerMappings()
+		panelName, ok = a.serverPanelMap[serverID]
+		if !ok {
+			return nil, "", fmt.Errorf("server %s is not on any configured panel", serverID)
+		}
+	}
+
 	for _, panel := range a.config.GetPanels() {
 		if panel.Name != panelName {
 			continue
@@ -224,12 +266,57 @@ func (a *App) withServerClient(serverID string, fn func(c *pterodactyl.Client, p
 		if !strings.HasPrefix(panelURL, "http://") && !strings.HasPrefix(panelURL, "https://") {
 			panelURL = "https://" + panelURL
 		}
-		tmp := pterodactyl.NewClient(panelURL, panel.APIKey, serverID)
-		defer tmp.Close()
-		return fn(tmp, panelName)
+		return pterodactyl.NewClient(panelURL, panel.APIKey, serverID), panelName, nil
+	}
+	return nil, "", fmt.Errorf("panel %q is no longer configured", panelName)
+}
+
+// clientFor hands back a client for one panel, building it at most once.
+//
+// NewClient probes /api/application/servers to work out whether the key is an
+// admin key, so constructing one per call meant an extra round trip for every
+// listing on another panel. The generation counter is bumped whenever a panel's
+// credentials change, so an edited key is never served from here.
+func (a *App) clientFor(panelName string) (*pterodactyl.Client, error) {
+	a.clientMu.Lock()
+	defer a.clientMu.Unlock()
+
+	if a.clients == nil {
+		a.clients = map[string]*cachedClient{}
+	}
+	if hit, ok := a.clients[panelName]; ok && hit.gen == a.clientGen {
+		return hit.client, nil
 	}
 
-	return fmt.Errorf("panel %q is no longer configured", panelName)
+	for _, panel := range a.config.GetPanels() {
+		if panel.Name != panelName {
+			continue
+		}
+		panelURL := panel.PanelURL
+		if !strings.HasPrefix(panelURL, "http://") && !strings.HasPrefix(panelURL, "https://") {
+			panelURL = "https://" + panelURL
+		}
+		built := pterodactyl.NewClient(panelURL, panel.APIKey, "")
+		if old, ok := a.clients[panelName]; ok {
+			old.client.Close()
+		}
+		a.clients[panelName] = &cachedClient{client: built, gen: a.clientGen}
+		return built, nil
+	}
+
+	return nil, fmt.Errorf("panel %q is no longer configured", panelName)
+}
+
+// invalidateClients drops every cached client. Called whenever a panel's URL or
+// keys change, so nothing is served with credentials that no longer apply.
+func (a *App) invalidateClients() {
+	a.clientMu.Lock()
+	defer a.clientMu.Unlock()
+	for _, hit := range a.clients {
+		hit.client.Close()
+	}
+	a.clients = map[string]*cachedClient{}
+	a.clientGen++
 }
 
 // activeServerID is the server the main editor is pointed at.
@@ -253,6 +340,15 @@ func (a *App) activeServerID() string {
 // A file too large to hold still gets an entry, marked uncaptured, so the UI
 // can say plainly that this one is not recoverable rather than implying it is.
 func (a *App) captureRemote(kind safestore.Kind, c *pterodactyl.Client, panel, serverID, remotePath, reason string, knownSize int64) (safestore.Entry, error) {
+	return a.captureBytes(kind, c, panel, serverID, remotePath, reason, knownSize, nil)
+}
+
+// captureBytes is captureRemote for a caller that already holds the content.
+//
+// A save has just read the file to compare against the editor's baseline;
+// fetching it a second time to put in the history doubled the transfer of every
+// save for no gain.
+func (a *App) captureBytes(kind safestore.Kind, c *pterodactyl.Client, panel, serverID, remotePath, reason string, knownSize int64, known []byte) (safestore.Entry, error) {
 	if a.store == nil {
 		return safestore.Entry{}, errors.New("local store unavailable")
 	}
@@ -262,6 +358,20 @@ func (a *App) captureRemote(kind safestore.Kind, c *pterodactyl.Client, panel, s
 		Server: serverID,
 		Path:   remotePath,
 		Reason: reason,
+	}
+
+	if known != nil {
+		if int64(len(known)) > safestore.MaxSingleCapture {
+			meta.Note = fmt.Sprintf("file is %d bytes, over the %d byte capture limit",
+				len(known), safestore.MaxSingleCapture)
+			return a.store.Put(kind, meta, nil)
+		}
+		entry, err := a.store.Put(kind, meta, known)
+		if errors.Is(err, safestore.ErrTooLarge) {
+			meta.Note = err.Error()
+			return a.store.Put(kind, meta, nil)
+		}
+		return entry, err
 	}
 
 	if knownSize > safestore.MaxSingleCapture {
@@ -307,7 +417,11 @@ type SaveResult struct {
 // returned, so an edit made elsewhere is never silently overwritten. force
 // skips only that check — the local backup is taken either way.
 func (a *App) SafeSaveFileContent(remotePath, content, expected string, force bool) (*SaveResult, error) {
-	return a.SafeSaveFileContentToServer(a.activeServerID(), remotePath, content, expected, force)
+	// Deliberately "" rather than activeServerID(): the id is resolved inside
+	// withServerClient, which runs under fileMu. Reading it here meant reading
+	// the shared client while another operation had it temporarily pointed at
+	// its own server, and writing this file onto that one.
+	return a.SafeSaveFileContentToServer("", remotePath, content, expected, force)
 }
 
 // SafeSaveFileContentToServer is SafeSaveFileContent for an explicit server,
@@ -362,8 +476,8 @@ func (a *App) SafeSaveFileContentToServer(serverID, remotePath, content, expecte
 			// The state being replaced becomes the newest entry in this file's
 			// history. A write whose history entry failed is refused: saving
 			// anyway would be the one case with no way back.
-			entry, captureErr := a.captureRemote(safestore.KindVersion, c, panel,
-				serverIDOr(serverID, c), cleaned, "edited", int64(len(remote)))
+			entry, captureErr := a.captureBytes(safestore.KindVersion, c, panel,
+				serverIDOr(serverID, c), cleaned, "edited", int64(len(remote)), []byte(remote))
 			if captureErr != nil {
 				return fmt.Errorf("refusing to write: saving the previous version locally failed: %w", captureErr)
 			}
@@ -404,8 +518,10 @@ func (a *App) CreateFileStrict(remotePath string) error {
 		if listErr != nil {
 			return fmt.Errorf("cannot check %s before creating the file: %w", dir, listErr)
 		}
+		// Exact, not case-folded: the panel's filesystem is case sensitive, so
+		// Config.yml existing is no reason to refuse config.yml.
 		for _, f := range files {
-			if strings.EqualFold(f.Name, name) {
+			if f.Name == name {
 				return fmt.Errorf("%s already exists in %s", name, dir)
 			}
 		}
@@ -429,7 +545,7 @@ func (a *App) CreateFolderStrict(remotePath string) error {
 			return fmt.Errorf("cannot check %s before creating the folder: %w", dir, listErr)
 		}
 		for _, f := range files {
-			if strings.EqualFold(f.Name, name) {
+			if f.Name == name {
 				return fmt.Errorf("%s already exists in %s", name, dir)
 			}
 		}
@@ -460,7 +576,7 @@ func (a *App) RenameFileStrict(oldPath, newName string) error {
 			return fmt.Errorf("cannot check %s before renaming: %w", dir, listErr)
 		}
 		for _, f := range files {
-			if strings.EqualFold(f.Name, newName) {
+			if f.Name == newName {
 				return fmt.Errorf("%s already exists in %s", newName, dir)
 			}
 		}
@@ -520,15 +636,25 @@ func (a *App) ReadFileForEdit(serverID, remotePath string) (*FileRead, error) {
 			return nil
 		}
 
-		content, readErr := c.GetFileContent(cleaned)
+		// The read is bounded whatever the listing said. Trusting the listing
+		// alone meant a file it did not mention — a failed listing, a name it
+		// omitted — was pulled in whole, however large it was.
+		content, readErr := c.DownloadFileBytes(cleaned, EditorMaxOpenBytes)
 		if readErr != nil {
+			if strings.Contains(readErr.Error(), "over the") {
+				out.TooBig = true
+				if out.Size == 0 {
+					out.Size = EditorMaxOpenBytes + 1
+				}
+				return nil
+			}
 			return readErr
 		}
-		if !utf8.ValidString(content) {
+		if !utf8.Valid(content) {
 			out.Binary = true
 			return nil
 		}
-		out.Content = content
+		out.Content = string(content)
 		if out.Size == 0 {
 			out.Size = int64(len(content))
 		}
@@ -835,6 +961,8 @@ func (a *App) walkForDelete(c *pterodactyl.Client, dir string, depth int, plan *
 				Level: ProtectSensitive, Reason: "a symlink; its target is not captured",
 			})
 			plan.FileCount++
+			// Capturable stays false, and the bin entry says why rather than
+			// falling back to a bare "content was not captured".
 			continue
 		}
 
@@ -1071,6 +1199,11 @@ type StoreStats struct {
 	VersionUsed  int64  `json:"version_used"`
 	VersionLimit int64  `json:"version_limit"`
 	VersionCount int    `json:"version_count"`
+
+	// Set when an index could not be read at startup. The blobs it described
+	// are still on disk but nothing tracks them any more, so the Vault says so
+	// instead of quietly showing an empty store.
+	Warning string `json:"warning"`
 }
 
 // GetStoreStats reports what the local store is holding.
@@ -1078,7 +1211,21 @@ func (a *App) GetStoreStats() (*StoreStats, error) {
 	if a.store == nil {
 		return nil, errors.New("local store unavailable")
 	}
+	warning := ""
+	if aside := a.store.Orphaned(safestore.KindBin); aside != "" {
+		warning = "The recycle bin's index could not be read and was moved to " + aside +
+			". Its files are still on disk but are no longer listed here."
+	}
+	if aside := a.store.Orphaned(safestore.KindVersion); aside != "" {
+		if warning != "" {
+			warning += " "
+		}
+		warning += "The version history's index could not be read and was moved to " + aside +
+			". Its files are still on disk but are no longer listed here."
+	}
+
 	return &StoreStats{
+		Warning:      warning,
 		Root:         a.store.Root(),
 		BinUsed:      a.store.Usage(safestore.KindBin),
 		BinLimit:     a.store.Limit(safestore.KindBin),
@@ -1104,11 +1251,15 @@ func (a *App) ListFileVersions(serverID, remotePath string) ([]safestore.Entry, 
 	if a.store == nil {
 		return nil, errors.New("local store unavailable")
 	}
-	if serverID == "" {
-		serverID = a.activeServerID()
-	}
 	if remotePath == "" {
 		return a.store.List(safestore.KindVersion), nil
+	}
+	if serverID == "" {
+		// Under the lock for the same reason a save is: the shared client's
+		// id is only meaningful while nothing else is borrowing it.
+		a.fileMu.Lock()
+		serverID = a.activeServerID()
+		a.fileMu.Unlock()
 	}
 	cleaned, err := normalizeRemotePath(remotePath)
 	if err != nil {
@@ -1610,6 +1761,11 @@ func (a *App) GetServerLogTail(maxLines int) (*LogTail, error) {
 			}
 
 			lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+			// A file ending in a newline splits to a trailing empty element,
+			// which is not a line anyone wrote.
+			if n := len(lines); n > 0 && lines[n-1] == "" {
+				lines = lines[:n-1]
+			}
 			if len(lines) > maxLines {
 				lines = lines[len(lines)-maxLines:]
 				out.Truncated = true
@@ -1913,6 +2069,16 @@ func (a *App) DownloadToDisk(paths []string) (*DownloadOutcome, error) {
 				names = append(names, name)
 			}
 
+			// What is in the folder before the archive is made. The cleanup
+			// below deletes by name, and deleting a name that was already
+			// there would remove a file nobody selected.
+			before := map[string]bool{}
+			if existing, listErr := c.ListFiles(root); listErr == nil {
+				for i := range existing {
+					before[existing[i].Name] = true
+				}
+			}
+
 			attrs, compressErr := c.CompressFiles(root, names)
 			if compressErr != nil {
 				return fmt.Errorf("could not archive the selection: %w", compressErr)
@@ -1922,13 +2088,15 @@ func (a *App) DownloadToDisk(paths []string) (*DownloadOutcome, error) {
 				return errors.New("the panel did not say what it named the archive")
 			}
 			source = joinRemote(root, archive)
-			temporary = true
+			// Only ours to delete if it was not there a moment ago.
+			temporary = !before[archive]
 		}
 
 		written, dlErr := c.DownloadFileTo(source, chosen)
 
 		// The archive was this call's doing, so this call takes it back —
-		// whether or not the download worked.
+		// whether or not the download worked. An archive whose name already
+		// existed is left alone: it is not ours.
 		if temporary {
 			dir, name, splitErr := splitRemote(source)
 			if splitErr == nil {
@@ -1995,20 +2163,31 @@ func (a *App) OpenConsoleWindow(serverID string) error {
 		return errors.New("this is already a console window")
 	}
 
+	// serverPanelMap is rebuilt wholesale by RefreshAllServerMappings, which
+	// runs under fileMu. Reading it without the lock is a concurrent map
+	// access, and Wails gives every binding call its own goroutine — so this
+	// could take the process down with "concurrent map read and map write".
+	a.fileMu.Lock()
 	if serverID == "" {
 		serverID = a.activeServerID()
 	}
+	panelName := ""
+	var known []pterodactyl.ServerInfo
+	if serverID != "" {
+		panelName = a.serverPanelMap[serverID]
+		known = a.lastKnownServers()
+	}
+	a.fileMu.Unlock()
+
 	if serverID == "" {
 		return errors.New("no server selected")
 	}
-
-	panelName := a.serverPanelMap[serverID]
 	if panelName == "" {
 		panelName = a.config.GetActivePanelName()
 	}
 
 	label := serverID
-	for _, s := range a.lastKnownServers() {
+	for _, s := range known {
 		if s.ID == serverID && s.Name != "" {
 			label = s.Name
 			break
@@ -2099,13 +2278,19 @@ func (a *App) SearchFiles(root, query string) (*SearchOutcome, error) {
 		return nil, err
 	}
 
-	a.fileMu.Lock()
-	defer a.fileMu.Unlock()
+	// A walk can run for the whole deadline, and holding fileMu for twenty
+	// seconds froze every save, listing and upload behind it. Its own client
+	// means nothing else is sharing the server id it is walking.
+	c, _, err := a.dedicatedClient("")
+	if err != nil {
+		return nil, err
+	}
+	defer c.Close()
 
 	out := &SearchOutcome{Query: query, Root: cleanRoot, Hits: []SearchHit{}}
 	started := time.Now()
 
-	err = a.withServerClient("", func(c *pterodactyl.Client, _ string) error {
+	err = func() error {
 		type todo struct {
 			path  string
 			depth int
@@ -2165,7 +2350,7 @@ func (a *App) SearchFiles(root, query string) (*SearchOutcome, error) {
 			}
 		}
 		return nil
-	})
+	}()
 	if err != nil {
 		return nil, err
 	}
@@ -2274,7 +2459,17 @@ func (a *App) UploadBatch(baseDir string, items []UploadItem, overwrite, keepCop
 		for dir := range dirs {
 			ordered = append(ordered, dir)
 		}
-		sort.Slice(ordered, func(i, j int) bool { return len(ordered[i]) < len(ordered[j]) })
+		// By depth, not by string length: "/verylongname" is shallower than
+		// "/a/b/c" but sorts after it on length, so a parent could be created
+		// after its own child.
+		depth := func(p string) int { return strings.Count(strings.Trim(p, "/"), "/") }
+		sort.Slice(ordered, func(i, j int) bool {
+			di, dj := depth(ordered[i]), depth(ordered[j])
+			if di != dj {
+				return di < dj
+			}
+			return ordered[i] < ordered[j]
+		})
 
 		for _, dir := range ordered {
 			if dir == "/" || dir == base {

@@ -323,3 +323,43 @@ func TestSanitizeKeepsNamesUsableOnWindows(t *testing.T) {
 		}
 	}
 }
+
+// A corrupt index used to be replaced silently, leaving every blob it named on
+// disk with nothing tracking it and no sign anything had gone wrong.
+func TestCorruptIndexIsMovedAsideNotDropped(t *testing.T) {
+	root := t.TempDir()
+
+	s, err := New(root)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	put(t, s, KindBin, "/a.txt", 64, "deleted")
+
+	indexPath := s.files[KindBin]
+	if err := os.WriteFile(indexPath, []byte("{not json"), 0o600); err != nil {
+		t.Fatalf("corrupt the index: %v", err)
+	}
+
+	again, err := New(root)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+
+	if n := len(again.List(KindBin)); n != 0 {
+		t.Fatalf("expected an empty store after a corrupt index, got %d entries", n)
+	}
+
+	aside := again.Orphaned(KindBin)
+	if aside == "" {
+		t.Fatal("the corrupt index was not reported")
+	}
+	if _, statErr := os.Stat(aside); statErr != nil {
+		t.Fatalf("the corrupt index was not kept at %s: %v", aside, statErr)
+	}
+
+	// A fresh index takes over cleanly.
+	put(t, again, KindBin, "/b.txt", 32, "deleted")
+	if n := len(again.List(KindBin)); n != 1 {
+		t.Fatalf("the store did not recover: %d entries", n)
+	}
+}
