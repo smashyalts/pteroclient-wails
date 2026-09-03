@@ -155,6 +155,8 @@
                 <button onclick="window.app.newFile()" type="button" class="icon-only" title="New file (Ctrl+N)" id="filesNewFileBtn"></button>
                 <button onclick="window.app.downloadSelected()" type="button" class="icon-only" title="Download to this computer" id="filesDownloadBtn"></button>
                 <button onclick="window.app.deleteSelected()" class="danger icon-only" title="Delete selected (Del)" type="button" id="filesDeleteBtn"></button>
+                <button id="sftpBtn" type="button" class="icon-only"
+                        title="Connect over SFTP for fast folder transfers"></button>
                 <div class="header-divider"></div>
                 <button onclick="window.app.toggleFileDetails()" type="button" class="icon-only" title="Show permissions" id="filesDetailsBtn"></button>
                 <button onclick="window.app.cycleTreeDock()" type="button" class="icon-only" title="Move the file tree (Ctrl+Shift+B)" id="filesDockBtn"></button>
@@ -206,6 +208,17 @@
                         </div>
                     </div>
                 </div>
+            </div>
+
+            <!-- Only up while something is moving. -->
+            <div class="sftp-bar" id="sftpBar" hidden>
+                <div class="sftp-bar-top">
+                    <span class="sftp-bar-label" id="sftpBarLabel"></span>
+                    <span class="spacer"></span>
+                    <span class="sftp-bar-detail mono" id="sftpBarDetail"></span>
+                    <button class="sm" id="sftpBarCancel" type="button">Cancel</button>
+                </div>
+                <div class="sftp-bar-track"><div class="sftp-bar-fill" id="sftpBarFill"></div></div>
             </div>
         </div>
 
@@ -430,6 +443,7 @@
 <script src="./ui-shell.js"></script>
 <script src="./panel-tabs.js"></script>
 <script src="./split-view.js"></script>
+<script src="./sftp.js"></script>
 <script src="./vault.js"></script>
 <script src="./appearance.js"></script>
 <script src="./commands.js"></script>

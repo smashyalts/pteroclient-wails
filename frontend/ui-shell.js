@@ -287,6 +287,7 @@
             filesNewFileBtn: 'filePlus',
             filesDeleteBtn: 'trash',
             filesDownloadBtn: 'download',
+            sftpBtn: 'plug',
             filesDetailsBtn: 'log',
             filesDockBtn: 'layout',
             splitViewBtn: 'split',

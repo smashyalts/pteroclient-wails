@@ -1818,7 +1818,23 @@ function initApp() {
             await this.loadFiles(this.currentPath);
         },
         
-        uploadFile() {
+        async uploadFile() {
+            // Over SFTP the transfer reads from disk, and a browser file input
+            // hands over contents without a path. So it asks the OS for the
+            // paths instead, which also allows whole folders.
+            if (window.SFTP && window.SFTP.isConnected()) {
+                let picked;
+                try {
+                    picked = await window.go.main.App.PickLocalFiles();
+                } catch (err) {
+                    window.UX.toast.bad(String(err));
+                    return;
+                }
+                if (!picked || !picked.length) return;
+                await window.SFTP.upload(picked, this.currentPath || '/');
+                return;
+            }
+
             const input = document.getElementById('fileInput');
             if (input) input.click();
         },
@@ -2375,6 +2391,13 @@ function initApp() {
             const paths = this.selectionPaths();
             if (!paths.length) {
                 await this.say('Nothing selected', 'Pick what you want to download first.');
+                return;
+            }
+
+            // Connected, this comes down directly and in parallel — no archive
+            // made on the panel, no size cap, and folders keep their shape.
+            if (window.SFTP && window.SFTP.isConnected()) {
+                await window.SFTP.download(paths);
                 return;
             }
 

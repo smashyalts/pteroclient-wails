@@ -15,11 +15,11 @@ import (
 
 // Client represents a Pterodactyl API client
 type Client struct {
-	client    *resty.Client
-	baseURL   string
-	apiKey    string
-	serverID  string
-	isAdmin   bool // Track if this is an admin API key
+	client   *resty.Client
+	baseURL  string
+	apiKey   string
+	serverID string
+	isAdmin  bool // Track if this is an admin API key
 }
 
 // FileAttributes represents the attributes of a file or directory
@@ -68,7 +68,7 @@ type FileContent struct {
 
 // RenameRequest represents a file rename request
 type RenameRequest struct {
-	Root string       `json:"root"`
+	Root  string       `json:"root"`
 	Files []RenameFile `json:"files"`
 }
 
@@ -132,10 +132,10 @@ func NewClient(baseURL, apiKey, serverID string) *Client {
 		apiKey:   apiKey,
 		serverID: serverID,
 	}
-	
+
 	// Auto-detect if this is an admin API key
 	c.detectAPIType()
-	
+
 	return c
 }
 
@@ -146,12 +146,12 @@ func (c *Client) detectAPIType() {
 	resp, err := c.client.R().
 		SetQueryParam("per_page", "1").
 		Get(adminEndpoint)
-	
+
 	if err == nil && resp.StatusCode() == http.StatusOK {
 		c.isAdmin = true
 		return
 	}
-	
+
 	// Not admin, must be client API
 	c.isAdmin = false
 }
@@ -195,7 +195,7 @@ func (c *Client) ListServers() ([]ServerInfo, error) {
 // listServersClient lists servers using client API
 func (c *Client) listServersClient() ([]ServerInfo, error) {
 	endpoint := fmt.Sprintf("%s/api/client", c.baseURL)
-	
+
 	resp, err := c.client.R().
 		SetResult(&ListServersResponse{}).
 		Get(endpoint)
@@ -209,7 +209,7 @@ func (c *Client) listServersClient() ([]ServerInfo, error) {
 	}
 
 	result := resp.Result().(*ListServersResponse)
-	
+
 	// Convert ServerObjects to ServerInfo
 	servers := make([]ServerInfo, len(result.Data))
 	for i, obj := range result.Data {
@@ -222,14 +222,14 @@ func (c *Client) listServersClient() ([]ServerInfo, error) {
 			Status:      obj.Attributes.Status,
 		}
 	}
-	
+
 	return servers, nil
 }
 
 // listServersAdmin lists servers using admin API
 func (c *Client) listServersAdmin() ([]ServerInfo, error) {
 	endpoint := fmt.Sprintf("%s/api/application/servers", c.baseURL)
-	
+
 	// Admin API requires pagination parameters
 	resp, err := c.client.R().
 		SetQueryParam("per_page", "100").
@@ -254,11 +254,11 @@ func (c *Client) listServersAdmin() ([]ServerInfo, error) {
 			} `json:"attributes"`
 		} `json:"data"`
 	}
-	
+
 	if err := json.Unmarshal(resp.Body(), &adminResp); err != nil {
 		return nil, fmt.Errorf("failed to parse admin response: %w", err)
 	}
-	
+
 	// Convert to ServerInfo
 	servers := make([]ServerInfo, len(adminResp.Data))
 	for i, obj := range adminResp.Data {
@@ -270,7 +270,7 @@ func (c *Client) listServersAdmin() ([]ServerInfo, error) {
 			IsOwner:     true, // Admins own all servers
 		}
 	}
-	
+
 	return servers, nil
 }
 
@@ -279,7 +279,7 @@ func (c *Client) ListFiles(path string) ([]FileInfo, error) {
 	// Note: Admin API keys can also access client endpoints
 	encodedPath := url.QueryEscape(path)
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/list?directory=%s", c.baseURL, c.serverID, encodedPath)
-	
+
 	resp, err := c.client.R().
 		SetResult(&ListFilesResponse{}).
 		Get(endpoint)
@@ -293,7 +293,7 @@ func (c *Client) ListFiles(path string) ([]FileInfo, error) {
 	}
 
 	result := resp.Result().(*ListFilesResponse)
-	
+
 	// Convert FileObjects to FileInfo
 	files := make([]FileInfo, len(result.Data))
 	for i, obj := range result.Data {
@@ -309,7 +309,7 @@ func (c *Client) ListFiles(path string) ([]FileInfo, error) {
 			ModifiedAt: obj.Attributes.ModifiedAt,
 		}
 	}
-	
+
 	return files, nil
 }
 
@@ -318,7 +318,7 @@ func (c *Client) GetFileContent(path string) (string, error) {
 	// Note: Admin API keys can also access client endpoints
 	encodedPath := url.QueryEscape(path)
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/contents?file=%s", c.baseURL, c.serverID, encodedPath)
-	
+
 	resp, err := c.client.R().
 		Get(endpoint)
 
@@ -337,7 +337,7 @@ func (c *Client) GetFileContent(path string) (string, error) {
 func (c *Client) SaveFileContent(path, content string) error {
 	encodedPath := url.QueryEscape(path)
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/write?file=%s", c.baseURL, c.serverID, encodedPath)
-	
+
 	resp, err := c.client.R().
 		SetBody(content).
 		SetHeader("Content-Type", "text/plain").
@@ -357,7 +357,7 @@ func (c *Client) SaveFileContent(path, content string) error {
 // CreateDirectory creates a new directory
 func (c *Client) CreateDirectory(path, name string) error {
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/create-folder", c.baseURL, c.serverID)
-	
+
 	body := map[string]string{
 		"root": path,
 		"name": name,
@@ -381,7 +381,7 @@ func (c *Client) CreateDirectory(path, name string) error {
 // RenameFile renames a file or directory
 func (c *Client) RenameFile(root, oldName, newName string) error {
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/rename", c.baseURL, c.serverID)
-	
+
 	req := RenameRequest{
 		Root: root,
 		Files: []RenameFile{
@@ -410,7 +410,7 @@ func (c *Client) RenameFile(root, oldName, newName string) error {
 // DeleteFiles deletes one or more files
 func (c *Client) DeleteFiles(root string, files []string) error {
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/delete", c.baseURL, c.serverID)
-	
+
 	req := DeleteRequest{
 		Root:  root,
 		Files: files,
@@ -435,7 +435,7 @@ func (c *Client) DeleteFiles(root string, files []string) error {
 func (c *Client) GetDownloadURL(path string) (string, error) {
 	encodedPath := url.QueryEscape(path)
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/download?file=%s", c.baseURL, c.serverID, encodedPath)
-	
+
 	resp, err := c.client.R().
 		Get(endpoint)
 
@@ -464,7 +464,7 @@ func (c *Client) GetDownloadURL(path string) (string, error) {
 func (c *Client) UploadFile(path string, filename string, content io.Reader) error {
 	// First, get upload URL
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/files/upload", c.baseURL, c.serverID)
-	
+
 	resp, err := c.client.R().
 		Get(endpoint)
 
@@ -506,7 +506,7 @@ func (c *Client) UploadFile(path string, filename string, content io.Reader) err
 // TestConnection tests if the API connection is working
 func (c *Client) TestConnection() error {
 	var endpoint string
-	
+
 	if c.isAdmin {
 		// For admin API, test with servers endpoint
 		endpoint = fmt.Sprintf("%s/api/application/servers/%s", c.baseURL, c.serverID)
@@ -514,7 +514,7 @@ func (c *Client) TestConnection() error {
 		// For client API, use the standard endpoint
 		endpoint = fmt.Sprintf("%s/api/client/servers/%s", c.baseURL, c.serverID)
 	}
-	
+
 	resp, err := c.client.R().Get(endpoint)
 	if err != nil {
 		return fmt.Errorf("connection failed: %w", err)
@@ -530,72 +530,72 @@ func (c *Client) TestConnection() error {
 // SendConsoleCommand sends a command to the server console
 func (c *Client) SendConsoleCommand(command string) error {
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/command", c.baseURL, c.serverID)
-	
+
 	payload := map[string]string{
 		"command": command,
 	}
-	
+
 	resp, err := c.client.R().
 		SetBody(payload).
 		Post(endpoint)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to send command: %w", err)
 	}
-	
+
 	if resp.StatusCode() != http.StatusNoContent && resp.StatusCode() != http.StatusOK {
 		return fmt.Errorf("failed to send command: status %d", resp.StatusCode())
 	}
-	
+
 	return nil
 }
 
 // GetServerState gets the current server power state
 func (c *Client) GetServerState() (string, error) {
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/resources", c.baseURL, c.serverID)
-	
+
 	resp, err := c.client.R().Get(endpoint)
 	if err != nil {
 		return "", fmt.Errorf("failed to get server state: %w", err)
 	}
-	
+
 	if resp.StatusCode() != http.StatusOK {
 		return "", fmt.Errorf("API returned status %d", resp.StatusCode())
 	}
-	
+
 	var result struct {
 		Attributes struct {
 			CurrentState string `json:"current_state"`
 		} `json:"attributes"`
 	}
-	
+
 	if err := json.Unmarshal(resp.Body(), &result); err != nil {
 		return "", err
 	}
-	
+
 	return result.Attributes.CurrentState, nil
 }
 
 // SetPowerState sets the server power state (start, stop, restart, kill)
 func (c *Client) SetPowerState(state string) error {
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/power", c.baseURL, c.serverID)
-	
+
 	payload := map[string]string{
 		"signal": state,
 	}
-	
+
 	resp, err := c.client.R().
 		SetBody(payload).
 		Post(endpoint)
-	
+
 	if err != nil {
 		return fmt.Errorf("failed to set power state: %w", err)
 	}
-	
+
 	if resp.StatusCode() != http.StatusNoContent && resp.StatusCode() != http.StatusOK {
 		return fmt.Errorf("failed to set power state: status %d", resp.StatusCode())
 	}
-	
+
 	return nil
 }
 
@@ -608,26 +608,26 @@ type WebSocketCredentials struct {
 // GetWebSocketCredentials retrieves WebSocket credentials for console connection
 func (c *Client) GetWebSocketCredentials() (*WebSocketCredentials, error) {
 	endpoint := fmt.Sprintf("%s/api/client/servers/%s/websocket", c.baseURL, c.serverID)
-	
+
 	resp, err := c.client.R().
 		Get(endpoint)
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to get WebSocket credentials: %w", err)
 	}
-	
+
 	if resp.StatusCode() != http.StatusOK {
 		return nil, fmt.Errorf("failed to get WebSocket credentials: status %d", resp.StatusCode())
 	}
-	
+
 	var response struct {
 		Data WebSocketCredentials `json:"data"`
 	}
-	
+
 	if err := json.Unmarshal(resp.Body(), &response); err != nil {
 		return nil, fmt.Errorf("failed to parse WebSocket credentials: %w", err)
 	}
-	
+
 	return &response.Data, nil
 }
 
@@ -777,4 +777,89 @@ func (c *Client) DownloadFileBytes(remotePath string, limit int64) ([]byte, erro
 		return nil, fmt.Errorf("%s is over the %d byte limit", remotePath, limit)
 	}
 	return data, nil
+}
+
+/* ------------------------------------------------------------------ SFTP */
+
+// SFTPDetails is where a server's SFTP service lives, and who to log in as.
+//
+// Pterodactyl authenticates SFTP against the panel account rather than the API
+// key, and the username is the account's name joined to the server's short id.
+// The password is the account's own, which is why nothing here asks the API for
+// it — the API cannot give it, and the app has to be told.
+type SFTPDetails struct {
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	Username string `json:"username"`
+	ServerID string `json:"server_id"`
+}
+
+// GetSFTPDetails reads the SFTP endpoint from the server record and builds the
+// username the panel expects.
+func (c *Client) GetSFTPDetails() (*SFTPDetails, error) {
+	endpoint := fmt.Sprintf("%s/api/client/servers/%s", c.baseURL, c.serverID)
+
+	resp, err := c.client.R().Get(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read the server record: %w", err)
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return nil, fmt.Errorf("API returned status %d: %s", resp.StatusCode(), resp.String())
+	}
+
+	var result struct {
+		Attributes struct {
+			Identifier  string `json:"identifier"`
+			SFTPDetails struct {
+				IP   string `json:"ip"`
+				Port int    `json:"port"`
+			} `json:"sftp_details"`
+		} `json:"attributes"`
+	}
+	if err := json.Unmarshal(resp.Body(), &result); err != nil {
+		return nil, err
+	}
+
+	details := &SFTPDetails{
+		Host:     result.Attributes.SFTPDetails.IP,
+		Port:     result.Attributes.SFTPDetails.Port,
+		ServerID: result.Attributes.Identifier,
+	}
+	if details.ServerID == "" {
+		details.ServerID = c.serverID
+	}
+	if details.Host == "" {
+		return nil, fmt.Errorf("this panel did not say where its SFTP service is")
+	}
+
+	// Best effort: without it the user types the whole username themselves,
+	// which is a worse first run but not a broken one.
+	if account, accErr := c.GetAccountUsername(); accErr == nil && account != "" {
+		details.Username = account + "." + details.ServerID
+	}
+	return details, nil
+}
+
+// GetAccountUsername reads the logged-in account's username, which is the first
+// half of the SFTP login.
+func (c *Client) GetAccountUsername() (string, error) {
+	endpoint := fmt.Sprintf("%s/api/client/account", c.baseURL)
+
+	resp, err := c.client.R().Get(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("failed to read the account: %w", err)
+	}
+	if resp.StatusCode() != http.StatusOK {
+		return "", fmt.Errorf("API returned status %d", resp.StatusCode())
+	}
+
+	var result struct {
+		Attributes struct {
+			Username string `json:"username"`
+		} `json:"attributes"`
+	}
+	if err := json.Unmarshal(resp.Body(), &result); err != nil {
+		return "", err
+	}
+	return result.Attributes.Username, nil
 }

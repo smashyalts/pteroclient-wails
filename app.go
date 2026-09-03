@@ -13,6 +13,7 @@ import (
 	"pteroclient-wails/pkg/config"
 	"pteroclient-wails/pkg/pterodactyl"
 	"pteroclient-wails/pkg/safestore"
+	"pteroclient-wails/pkg/sftpx"
 )
 
 // App struct
@@ -55,6 +56,14 @@ type App struct {
 	searchCancel func()
 	searchRun    uint64
 
+	// The SFTP connection, when there is one, and the host keys it is checked
+	// against. See sftp.go — the password lives inside the session and never
+	// touches disk.
+	sftpMu     sync.Mutex
+	sftpLink   *sftpLink
+	sftpCancel func()
+	sftpHosts  *sftpx.KnownHosts
+
 	// Set when this process was launched as a console window rather than the
 	// main app. See main.go and OpenConsoleWindow.
 	consoleOnly      bool
@@ -82,6 +91,9 @@ func NewApp() *App {
 // answering must not mean an app that will not quit. Whatever is left behind
 // is swept on the next run instead.
 func (a *App) shutdown(ctx context.Context) {
+	// The SFTP session first: it holds a password, and closing it is local.
+	a.SFTPDisconnect()
+
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -99,14 +111,28 @@ func (a *App) startup(ctx context.Context) {
 	a.serverPanelMap = make(map[string]string)
 	a.deletePlans = make(map[string]*DeletePlan)
 
+	// A password is held for as long as the connection is, so a connection
+	// nobody is using does not stay open all afternoon.
+	go a.sftpIdleSweep()
+
 	// The local copy store. Without it every write and delete is refused
 	// rather than performed unprotected.
 	if home, homeErr := os.UserHomeDir(); homeErr == nil {
-		store, storeErr := safestore.New(filepath.Join(home, ".pteroclient"))
+		root := filepath.Join(home, ".pteroclient")
+		store, storeErr := safestore.New(root)
 		if storeErr != nil {
 			runtime.LogError(a.ctx, "Failed to open the local file store: "+storeErr.Error())
 		} else {
 			a.store = store
+		}
+
+		// SFTP host keys. Without this store every connection would have to
+		// either trust any key or refuse every one.
+		hosts, hostErr := sftpx.NewKnownHosts(root)
+		if hostErr != nil {
+			runtime.LogError(a.ctx, "Failed to open the SFTP host store: "+hostErr.Error())
+		} else {
+			a.sftpHosts = hosts
 		}
 	} else {
 		runtime.LogError(a.ctx, "Failed to locate the home directory: "+homeErr.Error())

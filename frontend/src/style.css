@@ -2465,6 +2465,58 @@ body.console-window .logo-sub::after { content: " · console"; }
 
 .search-head button { margin-left: auto; }
 
+/* ========================================================================
+   Transfer bar
+   ------------------------------------------------------------------------
+   Under the file manager rather than in a corner: a folder upload is the
+   window's job for as long as it runs, not a notification.
+   ==================================================================== */
+
+.sftp-bar {
+    flex: none;
+    padding: 9px 12px 11px;
+    background: var(--bg-secondary);
+    border-top: 1px solid var(--line-strong);
+}
+
+.sftp-bar[hidden] { display: none; }
+
+.sftp-bar-top {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 7px;
+}
+
+.sftp-bar-top .spacer { flex: 1; }
+.sftp-bar-label { font-size: 12.5px; font-weight: 500; }
+
+.sftp-bar-detail {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    max-width: 52%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    direction: rtl;          /* a long path is more useful from its end */
+    text-align: right;
+}
+
+.sftp-bar-track {
+    height: 5px;
+    border-radius: var(--radius-pill);
+    background: var(--bg-hover);
+    overflow: hidden;
+}
+
+.sftp-bar-fill {
+    height: 100%;
+    width: 0;
+    border-radius: var(--radius-pill);
+    background: var(--accent);
+    transition: width .18s ease;
+}
+
 /* Shown only while the walk is still running. */
 .search-spin { display: inline-flex; color: var(--accent); }
 .search-spin[hidden] { display: none; }
