@@ -623,29 +623,15 @@ func (a *App) ReadFileForEdit(serverID, remotePath string) (*FileRead, error) {
 	out := &FileRead{Path: cleaned}
 
 	err = a.withServerClient(serverID, func(c *pterodactyl.Client, _ string) error {
-		dir, name, splitErr := splitRemote(cleaned)
-		if splitErr != nil {
+		if _, _, splitErr := splitRemote(cleaned); splitErr != nil {
 			return splitErr
 		}
 
-		files, listErr := c.ListFiles(dir)
-		if listErr == nil {
-			for _, f := range files {
-				if f.Name == name {
-					out.Size = f.Size
-					break
-				}
-			}
-		}
-
-		if out.Size > EditorMaxOpenBytes {
-			out.TooBig = true
-			return nil
-		}
-
-		// The read is bounded whatever the listing said. Trusting the listing
-		// alone meant a file it did not mention — a failed listing, a name it
-		// omitted — was pulled in whole, however large it was.
+		// No listing first. It was only ever a size hint, and the download
+		// refuses anything over the cap on its own — from the Content-Length,
+		// before a byte of the body is read — so the listing bought nothing and
+		// cost a round trip on the most common action in the app. Opening a
+		// file went from three requests to two.
 		content, readErr := c.DownloadFileBytes(cleaned, EditorMaxOpenBytes)
 		if readErr != nil {
 			if strings.Contains(readErr.Error(), "over the") {
