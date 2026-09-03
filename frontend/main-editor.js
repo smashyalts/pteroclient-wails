@@ -1431,6 +1431,92 @@ function initApp() {
             }
         },
         
+        /**
+         * Drag the edge between the tree and the editor.
+         *
+         * The pane used to carry `resize: horizontal`, which puts the handle in
+         * its bottom-right corner — under the file list's scrollbar, and
+         * nowhere near the border people actually aim at. This is the same
+         * grip the split view has.
+         *
+         * The size is measured from the pane's own edge rather than from a
+         * delta, so it stays right when the tree is docked right or bottom and
+         * the flex direction is reversed.
+         */
+        wireTreeGrip() {
+            const grip = document.getElementById('fileGrip');
+            const pane = document.querySelector('.file-manager > .file-pane');
+            if (!grip || !pane) return;
+
+            const MIN = 120;
+            const apply = (event) => {
+                const box = pane.getBoundingClientRect();
+                if (this.treeDock === 'bottom') {
+                    const max = Math.max(MIN, window.innerHeight - 160);
+                    const h = Math.min(max, Math.max(MIN, box.bottom - event.clientY));
+                    pane.style.height = h + 'px';
+                    pane.style.width = '';
+                    this.treeSize = h;
+                    return;
+                }
+                const max = Math.max(MIN, window.innerWidth - 220);
+                const w = this.treeDock === 'right'
+                    ? box.right - event.clientX
+                    : event.clientX - box.left;
+                const clamped = Math.min(max, Math.max(MIN, w));
+                pane.style.width = clamped + 'px';
+                pane.style.height = '';
+                this.treeSize = clamped;
+            };
+
+            grip.addEventListener('pointerdown', (down) => {
+                if (this.treeDock === 'hidden') return;
+                down.preventDefault();
+                grip.setPointerCapture(down.pointerId);
+                document.body.classList.add('resizing');
+
+                const move = (e) => apply(e);
+                const up = () => {
+                    grip.removeEventListener('pointermove', move);
+                    grip.removeEventListener('pointerup', up);
+                    grip.removeEventListener('pointercancel', up);
+                    document.body.classList.remove('resizing');
+                    try {
+                        localStorage.setItem('treeSize:' + this.treeDock, String(this.treeSize));
+                    } catch (err) { /* private mode */ }
+                };
+
+                grip.addEventListener('pointermove', move);
+                grip.addEventListener('pointerup', up);
+                grip.addEventListener('pointercancel', up);
+            });
+
+            // Double-click puts it back where it started.
+            grip.addEventListener('dblclick', () => {
+                pane.style.width = '';
+                pane.style.height = '';
+                try { localStorage.removeItem('treeSize:' + this.treeDock); } catch (err) { /* private mode */ }
+            });
+        },
+
+        // Each dock remembers its own size: a sensible width on the left is
+        // not a sensible height along the bottom.
+        restoreTreeSize() {
+            const pane = document.querySelector('.file-manager > .file-pane');
+            if (!pane) return;
+            pane.style.width = '';
+            pane.style.height = '';
+            if (this.treeDock === 'hidden') return;
+
+            let stored = null;
+            try { stored = localStorage.getItem('treeSize:' + this.treeDock); } catch (err) { /* private mode */ }
+            const size = parseInt(stored, 10);
+            if (!size || size < 120) return;
+
+            if (this.treeDock === 'bottom') pane.style.height = size + 'px';
+            else pane.style.width = size + 'px';
+        },
+
         // The tree can sit on either side, along the bottom, or be folded away
         // for a full-width editor.
         applyTreeDock(dock) {
@@ -1440,6 +1526,7 @@ function initApp() {
             manager.classList.add('dock-' + dock);
             this.treeDock = dock;
             try { localStorage.setItem('treeDock', dock); } catch (err) { /* private mode */ }
+            this.restoreTreeSize();
         },
 
         cycleTreeDock() {
@@ -1453,6 +1540,7 @@ function initApp() {
             let stored = 'left';
             try { stored = localStorage.getItem('treeDock') || 'left'; } catch (err) { /* private mode */ }
             this.applyTreeDock(['left', 'right', 'bottom', 'hidden'].indexOf(stored) === -1 ? 'left' : stored);
+            this.wireTreeGrip();
         },
 
         /**

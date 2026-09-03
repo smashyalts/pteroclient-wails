@@ -171,6 +171,12 @@
                     </div>
                 </div>
 
+                <!-- A real edge to grab. The pane used to rely on CSS
+                     resize: horizontal, whose handle is a corner the scrollbar
+                     sits on top of. -->
+                <div class="file-grip" id="fileGrip" role="separator"
+                     aria-orientation="vertical" aria-label="Resize the file list"></div>
+
                 <div class="editor-container">
                     <div class="editor-header">
                         <div class="editor-tabs" id="editorTabs"></div>

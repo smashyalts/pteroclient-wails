@@ -2045,11 +2045,32 @@ body.resizing .ws-grip { background: var(--accent); }
     min-width: 120px;
     max-width: 80vw;
     flex: none;
-    resize: horizontal;
     overflow: hidden;
     background: var(--bg-secondary);
     border-right: 1px solid var(--line);
 }
+
+/* The grab handle between the tree and the editor.
+   CSS resize: horizontal put the handle in the pane's bottom-right corner,
+   under the file list's scrollbar, so the edge itself did nothing. */
+.file-grip {
+    flex: none;
+    width: 5px;
+    cursor: col-resize;
+    background: transparent;
+    transition: background .12s ease;
+}
+
+.file-grip:hover,
+body.resizing .file-grip { background: var(--accent); }
+
+.file-manager.dock-bottom > .file-grip {
+    width: auto;
+    height: 5px;
+    cursor: row-resize;
+}
+
+.file-manager.dock-hidden > .file-grip { display: none; }
 
 /* The tree now lives inside .file-pane, which owns the width. */
 .file-pane > .file-tree {
