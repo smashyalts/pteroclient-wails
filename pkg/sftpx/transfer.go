@@ -37,15 +37,23 @@ var (
 	// Below this a file is one stream. Splitting a small file costs an open
 	// and a close per part for no gain, and most of a plugins folder is small
 	// files where the win is transferring several at once instead.
-	multipartMin int64 = 8 << 20 // 8 MB
+	//
+	// Low, because one connection has a hard ceiling. x/crypto/ssh fixes a
+	// channel's flow-control window at 64 packets of 32 KB — exactly 2 MB —
+	// so a single stream cannot have more than 2 MB outstanding however many
+	// requests it pipelines. That is 2 MB per round trip: about 33 MB/s at
+	// 60 ms, 13 MB/s at 150 ms. Nothing tunable gets past it; only more
+	// connections do, which is what splitting is for.
+	multipartMin int64 = 2 << 20 // 2 MB
 
 	// No part smaller than this, however many connections are free: parts that
 	// finish in a few round trips are all overhead.
-	multipartPartMin int64 = 4 << 20 // 4 MB
+	multipartPartMin int64 = 1 << 20 // 1 MB
 
 	// A ceiling on parts for one file, so a 40 GB world does not open forty
-	// handles.
-	multipartMaxParts = 8
+	// handles. Sixteen 2 MB windows is enough for a gigabit line at any
+	// latency somebody would put a game server behind.
+	multipartMaxParts = 16
 )
 
 // countingReader adds to a total as it is read.
@@ -108,24 +116,35 @@ func (s *Session) sendFile(ctx context.Context, job Job, running *int64) (int64,
 	}
 	size := info.Size()
 
-	// Written beside the target and moved into place, so an interrupted
-	// transfer never leaves something that looks complete.
-	temp := job.Remote + ".uploading"
+	// Replacing something goes through a temporary name and a rename, so an
+	// interrupted transfer cannot leave a half-written file where a complete
+	// one used to be. Writing a *new* file does not: there is nothing to
+	// protect, a failure is reported as a failure, and the rename would cost
+	// two more round trips per file — which on a folder of small configs is
+	// most of the time spent.
+	target := job.Remote
+	if job.Replace {
+		target = job.Remote + ".uploading"
+	}
 
 	var moved int64
 	if size >= multipartMin && len(s.conns) > 1 {
-		err = s.sendParts(ctx, src, temp, size, &moved, running)
+		err = s.sendParts(ctx, src, target, size, &moved, running)
 	} else {
-		err = s.sendWhole(ctx, src, temp, size, &moved, running)
+		err = s.sendWhole(ctx, src, target, size, &moved, running)
 	}
 	if err != nil {
-		s.removeQuietly(temp)
+		if job.Replace {
+			s.removeQuietly(target)
+		}
 		return moved, err
 	}
 
-	if err := s.replace(ctx, temp, job.Remote); err != nil {
-		s.removeQuietly(temp)
-		return moved, err
+	if job.Replace {
+		if err := s.replace(ctx, target, job.Remote); err != nil {
+			s.removeQuietly(target)
+			return moved, err
+		}
 	}
 	return moved, nil
 }
@@ -431,12 +450,15 @@ func (s *Session) replace(ctx context.Context, from, to string) error {
 	}
 	defer s.give(c)
 
-	// Most servers will not rename onto an existing name, so the old one goes
-	// first. It has already been captured by the caller when that was asked
-	// for, and the new content is completely written by this point.
-	if _, statErr := c.sftp.Stat(to); statErr == nil {
-		_ = c.sftp.Remove(to)
+	// Try it, rather than asking first. Most servers will not rename onto an
+	// existing name, but a Stat to find that out is a round trip every time to
+	// save one occasionally. The old file has already been captured by the
+	// caller when that was asked for, and the new content is completely
+	// written by this point.
+	if err := c.sftp.Rename(from, to); err == nil {
+		return nil
 	}
+	_ = c.sftp.Remove(to)
 	if err := c.sftp.Rename(from, to); err != nil {
 		return fmt.Errorf("cannot put %s in place: %w", to, err)
 	}

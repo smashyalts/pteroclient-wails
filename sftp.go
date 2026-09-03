@@ -394,6 +394,9 @@ func (a *App) SFTPUpload(localPaths []string, remoteDir string, overwrite, keepC
 			}
 		}
 		out.Replaced = append(out.Replaced, job.Remote)
+		// Tells the engine to go through a temporary name: there is something
+		// here worth not half-overwriting.
+		job.Replace = true
 		keep = append(keep, job)
 	}
 	jobs = keep

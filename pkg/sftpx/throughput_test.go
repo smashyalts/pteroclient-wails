@@ -354,3 +354,114 @@ func TestMultipartWhenItHelps(t *testing.T) {
 func restoreSplitLimits(min, part int64) {
 	multipartMin, multipartPartMin = min, part
 }
+
+// TestRawCeiling measures with no artificial delay at all.
+//
+// The proxy in the other tests sleeps per chunk, which caps throughput at
+// something far below a real link — those numbers are ratios, not speeds. This
+// one is the code's own ceiling: loopback, real cipher, real SFTP framing.
+func TestRawCeiling(t *testing.T) {
+	if testing.Short() {
+		t.Skip("moves 64 MB")
+	}
+
+	const size = 64 << 20
+
+	srv := startServer(t)
+	session := connect(t, srv, 6)
+
+	local := t.TempDir()
+	src, _ := randomFile(t, local, "raw.bin", size)
+
+	// One connection, pipelined.
+	var moved int64
+	start := time.Now()
+	if err := session.sendWhole(context.Background(), mustOpen(t, src), srv.at("raw-one.bin"),
+		int64(size), &moved, new(int64)); err != nil {
+		t.Fatalf("single: %v", err)
+	}
+	oneTime := time.Since(start)
+	t.Logf("64 MB, no added latency:")
+	t.Logf("  one connection ....... %s", rate(int64(size), oneTime))
+
+	// Split across all of them.
+	defer restoreSplitLimits(multipartMin, multipartPartMin)
+	multipartMin, multipartPartMin = 1<<20, 1<<20
+
+	start = time.Now()
+	result := session.Upload(context.Background(), []Job{
+		{Local: src, Remote: srv.at("raw-parts.bin"), Size: int64(size)},
+	}, nil)
+	partsTime := time.Since(start)
+	if result.Failed != 0 {
+		t.Fatalf("multipart: %s", result.Files[0].Error)
+	}
+	t.Logf("  %d connections, split . %s", session.Streams(), rate(int64(size), partsTime))
+
+	// And down again.
+	back := filepath.Join(t.TempDir(), "raw.bin")
+	start = time.Now()
+	down := session.Download(context.Background(), []Job{
+		{Local: back, Remote: srv.at("raw-parts.bin"), Size: int64(size)},
+	}, nil)
+	downTime := time.Since(start)
+	if down.Failed != 0 {
+		t.Fatalf("download: %s", down.Files[0].Error)
+	}
+	t.Logf("  download, split ...... %s", rate(int64(size), downTime))
+}
+
+// TestManySmallFiles is the case a plugins folder actually is.
+//
+// Per-file round trips dominate here — open, close, and whatever the rename
+// dance costs — so this measures the overhead rather than the bandwidth.
+func TestManySmallFiles(t *testing.T) {
+	if testing.Short() {
+		t.Skip("measures per-file overhead over a simulated link")
+	}
+
+	const rtt = 40 * time.Millisecond
+	const count = 40
+	const each = 8 << 10 // 8 KB, the size most config files are
+
+	srv := startServer(t)
+	proxy := startProxy(t, srv.addr, rtt)
+
+	host, portStr, _ := net.SplitHostPort(proxy.addr)
+	var port int
+	fmt.Sscanf(portStr, "%d", &port)
+
+	hosts, _ := NewKnownHosts(t.TempDir())
+	cfg := Config{Host: host, Port: port, User: "tester", Password: "correct-horse", Streams: 6}
+	if _, err := Dial(cfg, hosts); err != nil {
+		var unknown *ErrHostKeyUnknown
+		if asHostKeyUnknown(err, &unknown) {
+			cfg.AcceptFingerprint = unknown.Fingerprint
+		}
+	}
+	session, err := Dial(cfg, hosts)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer session.Close()
+
+	local := t.TempDir()
+	jobs := make([]Job, 0, count)
+	for i := 0; i < count; i++ {
+		p, _ := randomFile(t, local, fmt.Sprintf("s%03d.yml", i), each)
+		jobs = append(jobs, Job{Local: p, Remote: srv.at(fmt.Sprintf("small/s%03d.yml", i)), Size: each})
+	}
+
+	start := time.Now()
+	result := session.Upload(context.Background(), jobs, nil)
+	took := time.Since(start)
+	if result.Failed != 0 {
+		t.Fatalf("%d failed: %s", result.Failed, result.Files[0].Error)
+	}
+
+	perFile := took / count
+	t.Logf("%d files of %d KB over a %v link, %d connections", count, each/1024, rtt, session.Streams())
+	t.Logf("  total %v, %v per file, about %.1f round trips each",
+		took.Round(time.Millisecond), perFile.Round(time.Millisecond),
+		float64(perFile)/float64(rtt)*float64(session.Streams()))
+}

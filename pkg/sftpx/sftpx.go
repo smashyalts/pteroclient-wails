@@ -33,7 +33,10 @@ import (
 // requests within one file, and the win here is overlapping the many small
 // files a plugins folder is made of.
 const (
-	DefaultStreams = 6
+	// Eight rather than six: one connection can only hold 2 MB in flight
+	// (see multipartMin), so on a fast line the number of connections is the
+	// throughput.
+	DefaultStreams = 8
 	MaxStreams     = 16
 
 	// Requests in flight per file handle. SFTP is request/response, so a
@@ -393,6 +396,10 @@ type Job struct {
 	Local  string `json:"local"`
 	Remote string `json:"remote"`
 	Size   int64  `json:"size"`
+	// Replace says something is already at Remote. Set by the caller, which
+	// has listed the target directory anyway to decide about overwriting —
+	// so it costs nothing here and saves two round trips per new file.
+	Replace bool `json:"replace"`
 }
 
 // FileResult is what became of one job.
