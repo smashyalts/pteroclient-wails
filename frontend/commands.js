@@ -30,6 +30,18 @@
     const inCodeEditor = () => !!(document.activeElement && document.activeElement.closest &&
         document.activeElement.closest('#editor, .monaco-editor, .ws-code'));
 
+    // Whichever editor is in front. With the split open that is the focused
+    // workspace; without it, the main one.
+    function cycleFileTab(delta) {
+        const split = window.SplitView;
+        if (split && split.isActive() && split.cycleTab) {
+            if (split.cycleTab(delta)) return;
+            return;
+        }
+        const a = app();
+        if (a && a.cycleEditorTab) a.cycleEditorTab(delta);
+    }
+
     function register() {
         const R = window.UX.registerCommand;
 
@@ -62,6 +74,23 @@
                 label: 'Go to ' + entry[1],
                 run: () => window.Shell.showTab(entry[0])
             });
+        });
+
+        // Ctrl+Tab moves through the open files of whichever workspace is
+        // being worked in. allowInField because the caret is usually in the
+        // editor when you want it, which is the whole point.
+        R({
+            id: 'tabs.next', group: 'Navigation', key: 'Ctrl+Tab',
+            label: 'Next file tab',
+            allowInField: true,
+            run: () => cycleFileTab(1)
+        });
+
+        R({
+            id: 'tabs.prev', group: 'Navigation', key: 'Ctrl+Shift+Tab',
+            label: 'Previous file tab',
+            allowInField: true,
+            run: () => cycleFileTab(-1)
         });
 
         R({

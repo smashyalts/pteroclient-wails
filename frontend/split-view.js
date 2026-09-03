@@ -945,6 +945,17 @@
         goTo: (path) => browse(focused, path),
         useServer: (id, name, panel) => setServer(focused, id, name, panel),
 
+        // Ctrl+Tab, on the workspace being worked in.
+        cycleTab: (delta) => {
+            const st = space(focused);
+            const paths = Array.from(st.tabs.keys());
+            if (paths.length < 2) return false;
+            const at = paths.indexOf(st.activeTab);
+            const next = paths[((at < 0 ? 0 : at) + delta + paths.length) % paths.length];
+            showTab(focused, next);
+            return true;
+        },
+
         // Session restore reaches in through these.
         state: () => ({
             outer: outer,

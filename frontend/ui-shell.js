@@ -59,6 +59,13 @@
     const Dialog = {
         _resolve: null,
 
+        /**
+         * A confirm button that has to be pressed twice.
+         *
+         * For something recoverable but still worth meaning: a stray click
+         * cannot do it, and nobody has to type a word out. Typing is kept for
+         * what the recycle bin cannot take back.
+         */
         open(opts) {
             const modal = $('appDialog');
 
@@ -78,6 +85,13 @@
             const confirmBtn = modal.querySelector('[data-dialog-confirm]');
             confirmBtn.textContent = opts.confirmLabel || 'Confirm';
             confirmBtn.className = opts.danger ? 'danger' : 'primary';
+
+            // Reset whatever the last dialog left on it.
+            if (Dialog._disarm) { clearTimeout(Dialog._disarm); Dialog._disarm = null; }
+            delete confirmBtn.dataset.armed;
+            delete confirmBtn.dataset.was;
+            if (opts.confirmTwice) confirmBtn.dataset.twice = opts.confirmTwice;
+            else delete confirmBtn.dataset.twice;
             modal.classList.add('show');
 
             const first = modal.querySelector('.modal-body input, .modal-body textarea');
@@ -242,7 +256,29 @@
         modal.querySelectorAll('[data-dialog-cancel]').forEach((el) => {
             el.addEventListener('click', () => Dialog.close(null));
         });
-        modal.querySelector('[data-dialog-confirm]').addEventListener('click', () => Dialog.close(true));
+        modal.querySelector('[data-dialog-confirm]').addEventListener('click', (e) => {
+            const btn = e.currentTarget;
+
+            // A two-click confirm: the first press arms it, the second does it.
+            // Enough that a stray click cannot delete anything, without making
+            // people type a word out for something the recycle bin can undo.
+            if (btn.dataset.twice && !btn.dataset.armed) {
+                btn.dataset.armed = '1';
+                btn.dataset.was = btn.textContent;
+                btn.textContent = btn.dataset.twice;
+                btn.classList.add('armed');
+                // Disarms itself, so a dialog left open does not stay one
+                // click from deleting.
+                Dialog._disarm = setTimeout(() => {
+                    if (!btn.dataset.armed) return;
+                    delete btn.dataset.armed;
+                    btn.textContent = btn.dataset.was || 'Confirm';
+                    btn.classList.remove('armed');
+                }, 4000);
+                return;
+            }
+            Dialog.close(true);
+        });
         modal.addEventListener('click', (e) => {
             const choice = e.target.closest('[data-choice]');
             if (choice) Dialog.close(choice.getAttribute('data-choice'));
@@ -260,7 +296,13 @@
             if (e.target === modal) Dialog.close(null);
         });
         modal.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' && e.target.tagName === 'INPUT') Dialog.close(true);
+            if (e.key === 'Enter' && e.target.tagName === 'INPUT') {
+                const btn = modal.querySelector('[data-dialog-confirm]');
+                // Enter goes through the same arming, or a two-click confirm
+                // would be one keypress after all.
+                if (btn && btn.dataset.twice && !btn.dataset.armed) return btn.click();
+                Dialog.close(true);
+            }
         });
         // Escape cancels. Without this a dialog opened over a destructive
         // action has only one obvious way out, which is the confirm button.

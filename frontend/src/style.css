@@ -2465,6 +2465,19 @@ body.console-window .logo-sub::after { content: " · console"; }
 
 .search-head button { margin-left: auto; }
 
+/* A two-click confirm, armed. It has to look different from the resting
+   state or the second click is a guess. */
+button.armed {
+    outline: 2px solid var(--danger);
+    outline-offset: 1px;
+    animation: armedPulse .9s ease-in-out infinite;
+}
+
+@keyframes armedPulse {
+    0%, 100% { outline-color: var(--danger); }
+    50%      { outline-color: transparent; }
+}
+
 /* ========================================================================
    Transfer bar
    ------------------------------------------------------------------------

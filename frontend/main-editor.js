@@ -623,8 +623,16 @@ function initApp() {
             const cached = this.dirCacheGet(cacheKey);
             const token = (this.listToken = (this.listToken || 0) + 1);
 
+            // Only ever blank for a folder never seen before. A refresh, or
+            // stepping back into somewhere already visited, keeps what is on
+            // screen and swaps it out underneath — including the scroll
+            // position, which a redraw would have thrown away.
+            const sameFolder = this.lastRenderedPath === path;
             if (cached) {
-                this.renderFiles(cached.slice());
+                this.renderFiles(cached.slice(), { keepScroll: sameFolder });
+                tree.classList.add('stale');
+            } else if (sameFolder && this.renderedRows && this.renderedRows.length) {
+                // No cache, but this is a refresh of the folder already drawn.
                 tree.classList.add('stale');
             } else {
                 tree.innerHTML = '<div class="loading">Loading files...</div>';
@@ -634,12 +642,13 @@ function initApp() {
                 const files = await window.go.main.App.ListFiles(path);
                 // A slower earlier request must not overwrite a newer folder.
                 if (token !== this.listToken) return;
+                const wasAt = this.lastRenderedPath === path;
                 this.dirCachePut(cacheKey, files || []);
                 // Ctrl+K can only offer a folder it has heard of, and this is
                 // where it hears about them - including subfolders nobody has
                 // opened yet.
                 if (window.Folders) window.Folders.remember(config.serverID, path, files);
-                this.renderFiles(files || []);
+                this.renderFiles(files || [], { keepScroll: wasAt });
                 tree.classList.remove('stale');
             } catch (err) {
                 if (token !== this.listToken) return;
@@ -709,9 +718,13 @@ function initApp() {
             if (this.dirCache) this.dirCache.clear();
         },
         
-        renderFiles(files) {
+        renderFiles(files, opts) {
             const tree = document.getElementById('fileTree');
             if (!tree) return;
+
+            // Where the list was, so a refresh does not jump back to the top.
+            const keep = opts && opts.keepScroll;
+            const wasScrolled = keep ? tree.scrollTop : 0;
 
             tree.innerHTML = '';
             this.renderedRows = [];
@@ -743,6 +756,12 @@ function initApp() {
 
             if (files.length === 0 && this.currentPath === '/') {
                 tree.innerHTML = '<div class="preview-empty">No files found</div>';
+            }
+
+            this.lastRenderedPath = this.currentPath;
+            if (keep && wasScrolled) {
+                // After the rows exist, or there is nothing to scroll within.
+                tree.scrollTop = Math.min(wasScrolled, tree.scrollHeight);
             }
         },
 
@@ -1372,6 +1391,22 @@ function initApp() {
             tabsContainer.appendChild(tab);
         },
         
+        /**
+         * Ctrl+Tab through the open files.
+         *
+         * Insertion order, not most-recently-used: the tab strip is in that
+         * order too, and a cycle that does not match what is on screen is a
+         * cycle nobody can follow.
+         */
+        cycleEditorTab(delta) {
+            const paths = Array.from(this.openFiles.keys());
+            if (paths.length < 2) return false;
+            const at = paths.indexOf(this.activeFile);
+            const next = paths[((at < 0 ? 0 : at) + delta + paths.length) % paths.length];
+            this.switchToFile(next);
+            return true;
+        },
+
         switchToFile(path) {
             const file = this.openFiles.get(path);
             if (!file) return;
@@ -2174,10 +2209,12 @@ function initApp() {
             }
 
             const intro = this.renderDeletePlan(plan);
-            // Anything recursive, anything the backend flagged as critical, and
-            // anything that will not fit in the recycle bin has to be typed out.
-            const strict = (plan.critical && plan.critical.length > 0) ||
-                !plan.recoverable || plan.dir_count > 0;
+            // Typing it out is for what cannot be taken back: something the
+            // backend flagged as critical, or a selection the recycle bin
+            // cannot hold. A folder that is fully copied first is recoverable,
+            // and making people type DELETE for every one of those trained
+            // them to type it without reading.
+            const strict = (plan.critical && plan.critical.length > 0) || !plan.recoverable;
 
             if (strict) {
                 const v = await window.Shell.dialog.form('Delete ' + plan.roots.length + ' item(s)', [
@@ -2189,10 +2226,13 @@ function initApp() {
                     return;
                 }
             } else {
+                // Two clicks rather than a typed word: enough that a stray
+                // click cannot delete anything, without the ceremony.
                 const ok = await window.Shell.dialog.open({
                     title: 'Delete ' + plan.roots.length + ' item(s)',
                     body: intro,
                     confirmLabel: 'Delete',
+                    confirmTwice: 'Click again to delete',
                     danger: true
                 });
                 if (!ok) return;
@@ -3347,19 +3387,27 @@ function initApp() {
         
         async switchServer(serverID) {
             if (!serverID) return;
-            
+
             try {
                 console.log('Switching to server:', serverID);
                 await window.go.main.App.SwitchServer(serverID);
-                
-                // Update dropdown selection
+
+                // A server on another panel moves the panel too, and the
+                // dropdowns still held the old one's list — so setting the
+                // value silently did nothing and the header read the old panel
+                // and "No Server". Both are rebuilt from what is now active.
+                await this.loadPanels();
+                await this.loadServers();
+
                 const dropdown = document.getElementById('serverDropdown');
-                if (dropdown) {
+                if (dropdown && dropdown.value !== serverID) {
+                    // Only if the reload did not already select it, which it
+                    // does whenever the server is on the panel now active.
                     dropdown.value = serverID;
                 }
             } catch (err) {
                 console.error('Failed to switch server:', err);
-                alert('Failed to switch server: ' + err);
+                window.UX.toast.bad('Could not switch server: ' + err);
             }
         },
         
