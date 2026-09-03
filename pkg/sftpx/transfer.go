@@ -29,15 +29,19 @@ import (
 )
 
 // Multipart bounds.
-const (
+//
+// Variables rather than constants so the throughput tests can lower them: a
+// test that has to move 40 MB to cross the threshold takes a minute, and the
+// thing being measured does not depend on the size.
+var (
 	// Below this a file is one stream. Splitting a small file costs an open
 	// and a close per part for no gain, and most of a plugins folder is small
 	// files where the win is transferring several at once instead.
-	multipartMin = 8 << 20 // 8 MB
+	multipartMin int64 = 8 << 20 // 8 MB
 
 	// No part smaller than this, however many connections are free: parts that
 	// finish in a few round trips are all overhead.
-	multipartPartMin = 4 << 20 // 4 MB
+	multipartPartMin int64 = 4 << 20 // 4 MB
 
 	// A ceiling on parts for one file, so a 40 GB world does not open forty
 	// handles.

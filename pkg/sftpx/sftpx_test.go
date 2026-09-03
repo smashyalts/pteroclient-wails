@@ -306,7 +306,7 @@ func TestMultipartRoundTripIsIdentical(t *testing.T) {
 	local := t.TempDir()
 	// Over multipartMin, and deliberately not a multiple of the part size, so
 	// the last part carries an awkward remainder.
-	size := multipartMin + 3*1024*1024 + 7777
+	size := int(multipartMin) + 3*1024*1024 + 7777
 	src, sum := randomFile(t, local, "big.bin", size)
 
 	if parts := session.partCount(int64(size)); parts < 2 {
