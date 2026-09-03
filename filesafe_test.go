@@ -164,20 +164,23 @@ func TestEveryDirectoryIsAtLeastSensitive(t *testing.T) {
 // The token is what binds a confirmation to a selection. Different selections,
 // and the same selection on a different server, must not share one.
 func TestPlanTokenBindsServerAndPaths(t *testing.T) {
-	base := planToken("srv1", []string{"/a.txt", "/b.txt"})
+	base := planToken("srv1", []string{"/a.txt", "/b.txt"}, true)
 
-	same := planToken("srv1", []string{"/a.txt", "/b.txt"})
+	same := planToken("srv1", []string{"/a.txt", "/b.txt"}, true)
 	if base != same {
 		t.Fatal("the same selection produced two different tokens")
 	}
 
 	different := map[string]string{
-		"other server":  planToken("srv2", []string{"/a.txt", "/b.txt"}),
-		"extra path":    planToken("srv1", []string{"/a.txt", "/b.txt", "/c.txt"}),
-		"fewer paths":   planToken("srv1", []string{"/a.txt"}),
-		"other path":    planToken("srv1", []string{"/a.txt", "/c.txt"}),
-		"empty server":  planToken("", []string{"/a.txt", "/b.txt"}),
-		"joined naming": planToken("srv1", []string{"/a.txt/b.txt"}),
+		"other server":  planToken("srv2", []string{"/a.txt", "/b.txt"}, true),
+		"extra path":    planToken("srv1", []string{"/a.txt", "/b.txt", "/c.txt"}, true),
+		"fewer paths":   planToken("srv1", []string{"/a.txt"}, true),
+		"other path":    planToken("srv1", []string{"/a.txt", "/c.txt"}, true),
+		"empty server":  planToken("", []string{"/a.txt", "/b.txt"}, true),
+		"joined naming": planToken("srv1", []string{"/a.txt/b.txt"}, true),
+		// A plan shown promising recycle-bin copies must not be executable
+		// after the policy changed to keeping none.
+		"recycle bin off": planToken("srv1", []string{"/a.txt", "/b.txt"}, false),
 	}
 	for what, token := range different {
 		if token == base {
@@ -189,7 +192,7 @@ func TestPlanTokenBindsServerAndPaths(t *testing.T) {
 // The separator between paths keeps concatenation ambiguities out: without it
 // {"/ab", "/c"} and {"/a", "/bc"} would hash the same.
 func TestPlanTokenIsNotAmbiguous(t *testing.T) {
-	if planToken("s", []string{"/ab", "/c"}) == planToken("s", []string{"/a", "/bc"}) {
+	if planToken("s", []string{"/ab", "/c"}, true) == planToken("s", []string{"/a", "/bc"}, true) {
 		t.Fatal("two different selections share a token")
 	}
 }

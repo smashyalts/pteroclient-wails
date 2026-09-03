@@ -2442,3 +2442,88 @@ body.console-window .logo-sub::after { content: " · console"; }
     font-weight: 500;
     color: var(--text-faint);
 }
+
+/* ==========================================================================
+   Look tab
+   ========================================================================== */
+
+.theme-card {
+    overflow: hidden;
+    border: 1px solid var(--line-strong);
+    transition: border-color .12s ease;
+}
+
+.theme-card:hover { border-color: var(--line-bright); }
+.theme-card.is-current { border-color: var(--accent); }
+
+/* A miniature of the actual window rather than a row of swatches: the thing
+   worth knowing is whether text on a panel is readable. */
+.theme-swatch {
+    height: 78px;
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+}
+
+.theme-swatch > div:first-child {
+    border: 1px solid;
+    border-radius: 5px;
+    padding: 5px 7px;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 11.5px;
+    font-weight: 500;
+}
+
+.theme-dots { display: flex; gap: 5px; }
+.theme-dots i {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    display: block;
+}
+
+.theme-row {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--line);
+}
+
+.theme-row:last-of-type { border-bottom: 0; }
+
+.theme-row input[type="color"] {
+    flex: none;
+    width: 38px;
+    height: 28px;
+    padding: 0;
+    border: 1px solid var(--line-strong);
+    border-radius: 5px;
+    background: none;
+    cursor: pointer;
+}
+
+.theme-hex {
+    flex: none;
+    width: 92px;
+    text-align: center;
+    font-size: 12px;
+}
+
+.theme-ratio {
+    margin-left: 7px;
+    padding: 1px 5px;
+    border-radius: var(--radius-pill);
+    background: var(--bg-hover);
+    color: var(--text-dim);
+    font-size: 10.5px;
+    font-weight: 500;
+}
+
+.theme-ratio.is-low {
+    background: rgba(239, 68, 68, .16);
+    color: var(--danger-text);
+}

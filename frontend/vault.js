@@ -106,10 +106,14 @@
         let stats;
         let bin;
         let history;
+        let policies;
         try {
             stats = await api.GetStoreStats();
             bin = (await api.ListRecycleBin()) || [];
             history = (await api.ListFileVersions('', focusPath)) || [];
+            // A panel being unreachable must not stop the rest of the tab
+            // rendering, so this one is allowed to come back empty.
+            try { policies = await api.GetBinPolicies(); } catch (err) { policies = null; }
         } catch (err) {
             target.innerHTML = '<div class="empty-state">' + icon('warning') +
                 '<div class="empty-state-title" style="color:var(--danger-text)">The local store could not be read</div>' +
@@ -149,12 +153,56 @@
             '</div>' +
             '</div></div>';
 
+        /* ---- recycle bin per server ---- */
+        if (policies) {
+            const off = (policies.servers || []).filter(p => !p.enabled).length;
+            html += '<div class="card card-pad" style="margin-bottom:12px">' +
+                '<div class="list-meta"><span class="eyebrow">Recycle bin per server</span>' +
+                '<span>' + (off ? off + ' switched off' : 'on everywhere') + '</span></div>' +
+                '<div class="list-sub" style="margin-top:6px">With this off, a delete on that server keeps no copy ' +
+                'and cannot be undone. The confirmation says so before it runs.</div>' +
+                '<div style="margin-top:10px;display:flex;align-items:center;gap:9px">' +
+                '<label style="display:flex;align-items:center;gap:7px;font-size:12.5px">' +
+                '<input type="checkbox" id="vaultBinDefault"' + (policies.default ? ' checked' : '') + '>' +
+                'Keep copies on servers not set below</label></div>';
+
+            if (policies.partial) {
+                html += '<div class="list-sub" style="margin-top:8px;color:var(--warning)">' +
+                    'Some panels could not be reached, so this list may be short: ' +
+                    esc(policies.problem || '') + '</div>';
+            }
+
+            if (!(policies.servers || []).length) {
+                html += '<div class="list-sub" style="margin-top:10px">No servers to list yet.</div>';
+            } else {
+                html += '<div style="margin-top:12px;max-height:230px;overflow:auto;' +
+                    'border:1px solid var(--line);border-radius:6px">';
+                policies.servers.forEach((p) => {
+                    html += '<div class="list-row"' + (p.current ? ' style="background:var(--bg-secondary)"' : '') + '>' +
+                        '<span class="list-main"><span class="list-title">' + esc(p.name) +
+                        (p.current ? ' <span class="list-badge">this server</span>' : '') + '</span>' +
+                        '<span class="list-sub">' + esc(p.panel) + ' · ' +
+                        (p.explicit ? 'set here' : 'following the default') + '</span></span>' +
+                        '<label style="display:flex;align-items:center;gap:6px;font-size:12px">' +
+                        '<input type="checkbox" class="vault-bin-toggle" data-server="' + esc(p.server_id) + '"' +
+                        (p.enabled ? ' checked' : '') + '>Keep copies</label>' +
+                        (p.explicit
+                            ? '<button class="sm vault-bin-clear" type="button" data-server="' + esc(p.server_id) +
+                              '" title="Follow the default again">Reset</button>'
+                            : '') +
+                        '</div>';
+                });
+                html += '</div>';
+            }
+            html += '</div>';
+        }
+
         /* ---- recycle bin ---- */
         html += '<div class="eyebrow" style="margin:16px 0 9px">Recycle bin</div>';
         if (!bin.length) {
             html += '<div class="empty-state">' + icon('trash') +
                 '<div class="empty-state-title">The bin is empty</div>' +
-                '<div class="empty-state-hint">Deleted files land here, and so does anything an upload or a restore replaces. ' +
+                '<div class="empty-state-hint">Deleted files from <b>this server</b> land here, and so does anything an upload or a restore replaces. ' +
                 'Everything stays until the bin passes ' + bytes(stats.bin_limit) + ', then the oldest goes first.</div></div>';
         } else {
             // Grouped by the delete that produced them, so a folder that came
@@ -460,7 +508,57 @@
         reload();
     });
 
+    document.addEventListener('change', async (e) => {
+        const box = e.target;
+        if (!box || box.type !== 'checkbox') return;
+
+        if (box.id === 'vaultBinDefault') {
+            try {
+                await go().SetBinPolicyDefault(box.checked);
+            } catch (err) {
+                box.checked = !box.checked;
+                await window.Shell.dialog.confirm('Could not save that', esc(String(err)), { confirmLabel: 'OK' });
+                return;
+            }
+            return reload();
+        }
+
+        if (box.classList.contains('vault-bin-toggle')) {
+            const server = box.dataset.server;
+            // Turning it off is the dangerous direction, so it is confirmed
+            // once here rather than only at delete time.
+            if (!box.checked) {
+                const ok = await window.Shell.dialog.confirm('Stop keeping copies for this server?',
+                    'Deletes on this server will not be copied anywhere first, so nothing deleted there ' +
+                    'can be restored. The delete confirmation will say so each time.',
+                    { danger: true, confirmLabel: 'Stop keeping copies' });
+                if (!ok) {
+                    box.checked = true;
+                    return;
+                }
+            }
+            try {
+                await go().SetBinPolicy(server, box.checked);
+            } catch (err) {
+                box.checked = !box.checked;
+                await window.Shell.dialog.confirm('Could not save that', esc(String(err)), { confirmLabel: 'OK' });
+                return;
+            }
+            return reload();
+        }
+    });
+
     document.addEventListener('click', async (e) => {
+        const reset = e.target.closest && e.target.closest('.vault-bin-clear');
+        if (reset) {
+            try {
+                await go().ClearBinPolicy(reset.dataset.server);
+            } catch (err) {
+                await window.Shell.dialog.confirm('Could not reset that', esc(String(err)), { confirmLabel: 'OK' });
+            }
+            return reload();
+        }
+
         const el = e.target.closest('button');
         if (!el) return;
 

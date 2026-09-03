@@ -5,29 +5,43 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // PanelConfig represents configuration for a single panel
 type PanelConfig struct {
-	Name      string `json:"name"`
-	PanelURL  string `json:"panel_url"`
-	APIKey    string `json:"api_key"`
-	AdminKey  string `json:"admin_key,omitempty"` // Optional admin API key for listing all servers
-	ServerID  string `json:"server_id,omitempty"`
+	Name     string `json:"name"`
+	PanelURL string `json:"panel_url"`
+	APIKey   string `json:"api_key"`
+	AdminKey string `json:"admin_key,omitempty"` // Optional admin API key for listing all servers
+	ServerID string `json:"server_id,omitempty"`
 }
 
 // MultiConfig represents the multi-panel configuration
 type MultiConfig struct {
 	Panels      []PanelConfig `json:"panels"`
 	ActivePanel string        `json:"active_panel"`
+	// RecycleBin is per-server: true keeps a local copy of everything a delete
+	// takes away, false deletes straight through. Servers with no entry follow
+	// RecycleBinDefault.
+	RecycleBin map[string]bool `json:"recycle_bin,omitempty"`
+	// RecycleBinDefault applies to a server nobody has set. Nil means on,
+	// which is what it was before this existed.
+	RecycleBinDefault *bool `json:"recycle_bin_default,omitempty"`
 	// Legacy fields for backward compatibility
 	LegacyPanelURL string `json:"panel_url,omitempty"`
 	LegacyAPIKey   string `json:"api_key,omitempty"`
 	LegacyServerID string `json:"server_id,omitempty"`
 }
 
-// MultiConfigManager manages multi-panel configuration
+// MultiConfigManager manages multi-panel configuration.
+//
+// Guarded: every exported method here is reachable from a Wails binding, and
+// Wails runs each of those on its own goroutine. The panel slice was already
+// being read and rewritten concurrently, and the per-server map added below
+// would have turned that into a process abort rather than a stale read.
 type MultiConfigManager struct {
+	mu         sync.RWMutex
 	configPath string
 	config     *MultiConfig
 }
@@ -46,7 +60,7 @@ func NewMultiConfigManager() (*MultiConfigManager, error) {
 	}
 
 	configPath := filepath.Join(configDir, "config.json")
-	
+
 	mcm := &MultiConfigManager{
 		configPath: configPath,
 		config:     &MultiConfig{Panels: []PanelConfig{}},
@@ -60,6 +74,8 @@ func NewMultiConfigManager() (*MultiConfigManager, error) {
 
 // Load loads configuration from file
 func (mcm *MultiConfigManager) Load() error {
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
 	data, err := os.ReadFile(mcm.configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -106,7 +122,7 @@ func (mcm *MultiConfigManager) Load() error {
 				ActivePanel: "Default",
 			}
 			// Save in new format
-			mcm.Save()
+			_ = mcm.saveLocked()
 		} else {
 			return fmt.Errorf("failed to parse config file: %w", err)
 		}
@@ -117,6 +133,13 @@ func (mcm *MultiConfigManager) Load() error {
 
 // Save saves configuration to file
 func (mcm *MultiConfigManager) Save() error {
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
+	return mcm.saveLocked()
+}
+
+// saveLocked is Save for a caller that already holds the write lock.
+func (mcm *MultiConfigManager) saveLocked() error {
 	data, err := json.MarshalIndent(mcm.config, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
@@ -131,33 +154,42 @@ func (mcm *MultiConfigManager) Save() error {
 
 // GetActivePanel returns the active panel configuration
 func (mcm *MultiConfigManager) GetActivePanel() *PanelConfig {
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
+	return mcm.activePanelLocked()
+}
+
+// activePanelLocked is GetActivePanel for a caller already holding the lock.
+func (mcm *MultiConfigManager) activePanelLocked() *PanelConfig {
 	if mcm.config == nil || mcm.config.ActivePanel == "" {
 		return nil
 	}
-	
+
 	for i := range mcm.config.Panels {
 		if mcm.config.Panels[i].Name == mcm.config.ActivePanel {
 			return &mcm.config.Panels[i]
 		}
 	}
-	
+
 	// If active panel not found but panels exist, use first one
 	if len(mcm.config.Panels) > 0 {
 		mcm.config.ActivePanel = mcm.config.Panels[0].Name
 		return &mcm.config.Panels[0]
 	}
-	
+
 	return nil
 }
 
 // AddOrUpdatePanel adds or updates a panel configuration
 func (mcm *MultiConfigManager) AddOrUpdatePanel(panel PanelConfig) error {
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
 	if mcm.config == nil {
 		mcm.config = &MultiConfig{
 			Panels: []PanelConfig{},
 		}
 	}
-	
+
 	// Check if panel with same name exists
 	for i, p := range mcm.config.Panels {
 		if p.Name == panel.Name {
@@ -175,23 +207,32 @@ func (mcm *MultiConfigManager) AddOrUpdatePanel(panel PanelConfig) error {
 				panel.ServerID = p.ServerID
 			}
 			mcm.config.Panels[i] = panel
-			return mcm.Save()
+			return mcm.saveLocked()
 		}
 	}
-	
+
 	// Add new panel
 	mcm.config.Panels = append(mcm.config.Panels, panel)
-	
+
 	// If this is the first panel, make it active
 	if len(mcm.config.Panels) == 1 {
 		mcm.config.ActivePanel = panel.Name
 	}
-	
-	return mcm.Save()
+
+	return mcm.saveLocked()
 }
 
 // FindPanel returns the stored panel with this name, or nil.
 func (mcm *MultiConfigManager) FindPanel(name string) *PanelConfig {
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
+	return mcm.findPanelLocked(name)
+}
+
+// findPanelLocked is FindPanel for a caller that already holds the lock.
+// RWMutex is not reentrant, so taking the read lock while holding the write
+// lock deadlocks rather than merely being slow.
+func (mcm *MultiConfigManager) findPanelLocked(name string) *PanelConfig {
 	if mcm.config == nil {
 		return nil
 	}
@@ -206,29 +247,34 @@ func (mcm *MultiConfigManager) FindPanel(name string) *PanelConfig {
 // ClearAdminKey drops a panel's admin key. AddOrUpdatePanel treats a blank
 // admin key as "keep the stored one", so this is the only way to remove it.
 func (mcm *MultiConfigManager) ClearAdminKey(name string) error {
-	panel := mcm.FindPanel(name)
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
+
+	panel := mcm.findPanelLocked(name)
 	if panel == nil {
 		return fmt.Errorf("panel not found: %s", name)
 	}
 	panel.AdminKey = ""
-	return mcm.Save()
+	return mcm.saveLocked()
 }
 
 // RemovePanel removes a panel configuration
 func (mcm *MultiConfigManager) RemovePanel(name string) error {
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
 	if mcm.config == nil {
 		return nil
 	}
-	
+
 	var newPanels []PanelConfig
 	for _, p := range mcm.config.Panels {
 		if p.Name != name {
 			newPanels = append(newPanels, p)
 		}
 	}
-	
+
 	mcm.config.Panels = newPanels
-	
+
 	// If we removed the active panel, select another
 	if mcm.config.ActivePanel == name {
 		mcm.config.ActivePanel = ""
@@ -236,29 +282,33 @@ func (mcm *MultiConfigManager) RemovePanel(name string) error {
 			mcm.config.ActivePanel = mcm.config.Panels[0].Name
 		}
 	}
-	
-	return mcm.Save()
+
+	return mcm.saveLocked()
 }
 
 // SetActivePanel sets the active panel
 func (mcm *MultiConfigManager) SetActivePanel(name string) error {
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
 	if mcm.config == nil {
 		return fmt.Errorf("config not initialized")
 	}
-	
+
 	// Check if panel exists
 	for _, p := range mcm.config.Panels {
 		if p.Name == name {
 			mcm.config.ActivePanel = name
-			return mcm.Save()
+			return mcm.saveLocked()
 		}
 	}
-	
+
 	return fmt.Errorf("panel not found: %s", name)
 }
 
 // GetPanels returns all panel configurations
 func (mcm *MultiConfigManager) GetPanels() []PanelConfig {
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
 	if mcm.config == nil {
 		return []PanelConfig{}
 	}
@@ -267,6 +317,8 @@ func (mcm *MultiConfigManager) GetPanels() []PanelConfig {
 
 // GetActivePanelName returns the name of the active panel
 func (mcm *MultiConfigManager) GetActivePanelName() string {
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
 	if mcm.config == nil {
 		return ""
 	}
@@ -275,35 +327,44 @@ func (mcm *MultiConfigManager) GetActivePanelName() string {
 
 // IsConfigured checks if at least one panel is configured
 func (mcm *MultiConfigManager) IsConfigured() bool {
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
+
 	if mcm.config == nil || len(mcm.config.Panels) == 0 {
 		return false
 	}
-	
-	panel := mcm.GetActivePanel()
+
+	panel := mcm.activePanelLocked()
 	return panel != nil && panel.PanelURL != "" && panel.APIKey != ""
 }
 
 // UpdateActivePanelServer updates the server ID for the active panel
 func (mcm *MultiConfigManager) UpdateActivePanelServer(serverID string) error {
-	panel := mcm.GetActivePanel()
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
+
+	panel := mcm.activePanelLocked()
 	if panel == nil {
 		return fmt.Errorf("no active panel")
 	}
-	
+
 	// Update the panel in the list
 	for i := range mcm.config.Panels {
 		if mcm.config.Panels[i].Name == panel.Name {
 			mcm.config.Panels[i].ServerID = serverID
-			return mcm.Save()
+			return mcm.saveLocked()
 		}
 	}
-	
+
 	return fmt.Errorf("active panel not found in list")
 }
 
 // Backward compatibility wrapper
 func (mcm *MultiConfigManager) GetConfig() *Config {
-	panel := mcm.GetActivePanel()
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
+
+	panel := mcm.activePanelLocked()
 	if panel == nil {
 		return &Config{}
 	}
@@ -316,10 +377,12 @@ func (mcm *MultiConfigManager) GetConfig() *Config {
 
 // Backward compatibility wrapper
 func (mcm *MultiConfigManager) SetConfig(config *Config) {
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
 	if config == nil {
 		return
 	}
-	
+
 	// Update or add a "Default" panel
 	panel := PanelConfig{
 		Name:     "Default",
@@ -327,7 +390,93 @@ func (mcm *MultiConfigManager) SetConfig(config *Config) {
 		APIKey:   config.APIKey,
 		ServerID: config.ServerID,
 	}
-	
+
 	mcm.AddOrUpdatePanel(panel)
 	mcm.SetActivePanel("Default")
+}
+
+// ---------------------------------------------------- per-server recycle bin
+
+// RecycleBinEnabled reports whether deletes on this server keep a local copy.
+// Unset servers follow the default, which is on.
+func (mcm *MultiConfigManager) RecycleBinEnabled(serverID string) bool {
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
+
+	if mcm.config == nil {
+		return true
+	}
+	if on, set := mcm.config.RecycleBin[serverID]; set {
+		return on
+	}
+	if mcm.config.RecycleBinDefault != nil {
+		return *mcm.config.RecycleBinDefault
+	}
+	return true
+}
+
+// RecycleBinDefaultEnabled reports the setting for servers nobody has set.
+func (mcm *MultiConfigManager) RecycleBinDefaultEnabled() bool {
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
+
+	if mcm.config == nil || mcm.config.RecycleBinDefault == nil {
+		return true
+	}
+	return *mcm.config.RecycleBinDefault
+}
+
+// RecycleBinOverrides returns the servers that have been set explicitly.
+func (mcm *MultiConfigManager) RecycleBinOverrides() map[string]bool {
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
+
+	out := map[string]bool{}
+	for id, on := range mcm.config.RecycleBin {
+		out[id] = on
+	}
+	return out
+}
+
+// SetRecycleBinEnabled sets one server's policy.
+func (mcm *MultiConfigManager) SetRecycleBinEnabled(serverID string, on bool) error {
+	if serverID == "" {
+		return fmt.Errorf("no server given")
+	}
+
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
+
+	if mcm.config == nil {
+		return fmt.Errorf("config not initialized")
+	}
+	if mcm.config.RecycleBin == nil {
+		mcm.config.RecycleBin = map[string]bool{}
+	}
+	mcm.config.RecycleBin[serverID] = on
+	return mcm.saveLocked()
+}
+
+// ClearRecycleBinOverride puts one server back on the default.
+func (mcm *MultiConfigManager) ClearRecycleBinOverride(serverID string) error {
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
+
+	if mcm.config == nil {
+		return fmt.Errorf("config not initialized")
+	}
+	delete(mcm.config.RecycleBin, serverID)
+	return mcm.saveLocked()
+}
+
+// SetRecycleBinDefault sets the policy for servers nobody has set.
+func (mcm *MultiConfigManager) SetRecycleBinDefault(on bool) error {
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
+
+	if mcm.config == nil {
+		return fmt.Errorf("config not initialized")
+	}
+	mcm.config.RecycleBinDefault = &on
+	return mcm.saveLocked()
 }

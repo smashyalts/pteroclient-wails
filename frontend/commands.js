@@ -52,8 +52,8 @@
         const TABS = [
             ['console', 'Console'], ['files', 'Files'], ['databases', 'Databases'],
             ['schedules', 'Schedules'], ['users', 'Users'], ['network', 'Network'],
-            ['startup', 'Startup'], ['vault', 'Vault'], ['activity', 'Activity'],
-            ['settings', 'Settings']
+            ['startup', 'Startup'], ['settings', 'Server settings'],
+            ['vault', 'Vault'], ['activity', 'Activity'], ['appearance', 'Look']
         ];
         TABS.forEach((entry, i) => {
             R({

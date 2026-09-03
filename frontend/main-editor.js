@@ -2140,7 +2140,12 @@ function initApp() {
                 html += '<p style="color:var(--warning)">' + esc(w) + '</p>';
             });
 
-            if (plan.recoverable) {
+            if (plan.bin_enabled === false) {
+                // Not a shade of "some of this": nothing is copied at all.
+                html += '<p style="color:var(--danger-text)"><b>The recycle bin is off for this server.</b> ' +
+                    'Nothing here is copied anywhere first, and none of it can be restored. ' +
+                    'Turn it back on in Vault → Recycle bin per server.</p>';
+            } else if (plan.recoverable) {
                 html += '<p>All of it is copied to the local recycle bin first (' +
                     size(plan.bin_free) + ' free of ' + size(plan.bin_limit) + '), so it can be restored from Vault.</p>';
             } else {

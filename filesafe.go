@@ -693,13 +693,16 @@ type DeletePlan struct {
 	DirCount   int          `json:"dir_count"`
 	TotalBytes int64        `json:"total_bytes"`
 	// CaptureBytes is what will actually land in the recycle bin.
-	CaptureBytes int64    `json:"capture_bytes"`
-	BinFree      int64    `json:"bin_free"`
-	BinLimit     int64    `json:"bin_limit"`
-	Recoverable  bool     `json:"recoverable"`
-	Truncated    bool     `json:"truncated"`
-	Warnings     []string `json:"warnings"`
-	Critical     []string `json:"critical"`
+	CaptureBytes int64 `json:"capture_bytes"`
+	BinFree      int64 `json:"bin_free"`
+	BinLimit     int64 `json:"bin_limit"`
+	Recoverable  bool  `json:"recoverable"`
+	Truncated    bool  `json:"truncated"`
+	// BinEnabled is this server's recycle-bin policy. When it is off nothing
+	// is copied and every file in the plan is gone the moment it is deleted.
+	BinEnabled bool     `json:"bin_enabled"`
+	Warnings   []string `json:"warnings"`
+	Critical   []string `json:"critical"`
 
 	createdAt time.Time
 }
@@ -718,7 +721,7 @@ func (a *App) PlanDelete(serverID string, paths []string) (*DeletePlan, error) {
 	if len(paths) == 0 {
 		return nil, errors.New("nothing selected")
 	}
-	if a.store == nil {
+	if a.store == nil && a.config.RecycleBinEnabled(serverIDOrActive(a, serverID)) {
 		return nil, errors.New("local store unavailable; refusing to delete without a recycle bin")
 	}
 
@@ -757,15 +760,18 @@ func (a *App) PlanDelete(serverID string, paths []string) (*DeletePlan, error) {
 		return nil, errors.New("no server selected")
 	}
 
+	binOn := a.config.RecycleBinEnabled(serverID)
+
 	plan := &DeletePlan{
-		ServerID:  serverID,
-		Roots:     cleanRoots,
-		Items:     []DeleteItem{},
-		Warnings:  []string{},
-		Critical:  []string{},
-		BinFree:   a.store.Free(safestore.KindBin),
-		BinLimit:  a.store.Limit(safestore.KindBin),
-		createdAt: time.Now(),
+		BinEnabled: binOn,
+		ServerID:   serverID,
+		Roots:      cleanRoots,
+		Items:      []DeleteItem{},
+		Warnings:   []string{},
+		Critical:   []string{},
+		BinFree:    a.store.Free(safestore.KindBin),
+		BinLimit:   a.store.Limit(safestore.KindBin),
+		createdAt:  time.Now(),
 	}
 
 	err := a.withServerClient(serverID, func(c *pterodactyl.Client, _ string) error {
@@ -830,30 +836,41 @@ func (a *App) PlanDelete(serverID string, paths []string) (*DeletePlan, error) {
 		return nil, err
 	}
 
-	plan.Recoverable = plan.CaptureBytes <= plan.BinLimit && !plan.Truncated
-	for _, item := range plan.Items {
-		if !item.IsDir && !item.Capturable {
-			plan.Recoverable = false
-			break
+	plan.Recoverable = binOn && plan.CaptureBytes <= plan.BinLimit && !plan.Truncated
+	if binOn {
+		for _, item := range plan.Items {
+			if !item.IsDir && !item.Capturable {
+				plan.Recoverable = false
+				break
+			}
 		}
+	} else {
+		// Nothing is copied, so nothing is capturable and the totals that
+		// describe the copy are zero rather than misleading.
+		for i := range plan.Items {
+			plan.Items[i].Capturable = false
+		}
+		plan.CaptureBytes = 0
+		plan.Warnings = append(plan.Warnings,
+			"the recycle bin is switched off for this server — nothing here can be restored afterwards")
 	}
 
 	if plan.Truncated {
 		plan.Warnings = append(plan.Warnings,
 			fmt.Sprintf("more than %d entries — the listing below is partial and not everything can be backed up", maxPlanEntries))
 	}
-	if plan.CaptureBytes > plan.BinFree {
+	if binOn && plan.CaptureBytes > plan.BinFree {
 		plan.Warnings = append(plan.Warnings,
 			fmt.Sprintf("the recycle bin will evict its oldest %s to make room",
 				humanBytes(plan.CaptureBytes-plan.BinFree)))
 	}
-	if plan.CaptureBytes > plan.BinLimit {
+	if binOn && plan.CaptureBytes > plan.BinLimit {
 		plan.Warnings = append(plan.Warnings,
 			fmt.Sprintf("this is %s, over the %s recycle bin — the oldest files will not be recoverable",
 				humanBytes(plan.CaptureBytes), humanBytes(plan.BinLimit)))
 	}
 
-	plan.Token = planToken(serverID, cleanRoots)
+	plan.Token = planToken(serverID, cleanRoots, binOn)
 
 	// Lock order, for the record: fileMu then planMu. This is the only place
 	// both are held; SafeDeleteFiles releases planMu before it takes fileMu,
@@ -1022,7 +1039,7 @@ func (a *App) SafeDeleteFiles(token string) (*DeleteOutcome, error) {
 	if time.Since(plan.createdAt) > planTTL {
 		return nil, errors.New("that delete plan has expired — review the selection again")
 	}
-	if plan.Token != planToken(plan.ServerID, plan.Roots) {
+	if plan.Token != planToken(plan.ServerID, plan.Roots, plan.BinEnabled) {
 		return nil, errors.New("delete plan integrity check failed")
 	}
 
@@ -1130,6 +1147,12 @@ func (a *App) SafeDeleteFiles(token string) (*DeleteOutcome, error) {
 			if item.IsDir {
 				continue
 			}
+			if !plan.BinEnabled {
+				// Off for this server. Every file is named as unrecoverable
+				// rather than counted as saved.
+				outcome.Skipped = append(outcome.Skipped, item.Path)
+				continue
+			}
 			root := ownerRoot(plan.Roots, item.Path)
 
 			meta := safestore.Entry{
@@ -1222,9 +1245,16 @@ func (a *App) SafeDeleteFiles(token string) (*DeleteOutcome, error) {
 	return outcome, nil
 }
 
-func planToken(serverID string, roots []string) string {
+func planToken(serverID string, roots []string, binEnabled bool) string {
 	h := sha256.New()
 	h.Write([]byte(serverID))
+	// Part of the hash: a plan shown with copies promised must not be executed
+	// after the policy changed to not keeping any, or the other way round.
+	if binEnabled {
+		h.Write([]byte{1})
+	} else {
+		h.Write([]byte{0})
+	}
 	for _, r := range roots {
 		h.Write([]byte{0})
 		h.Write([]byte(r))
@@ -1288,12 +1318,36 @@ func (a *App) GetStoreStats() (*StoreStats, error) {
 	}, nil
 }
 
-// ListRecycleBin returns the bin, newest first.
+// ListRecycleBin returns this server's bin entries, newest first.
+//
+// This server's, not everything the store holds: the Vault sits in the same
+// rail as the server's own tabs, and showing another machine's deleted files
+// there read as if they belonged to the one on screen.
 func (a *App) ListRecycleBin() ([]safestore.Entry, error) {
 	if a.store == nil {
 		return nil, errors.New("local store unavailable")
 	}
-	return a.store.List(safestore.KindBin), nil
+	return a.forThisServer(a.store.List(safestore.KindBin)), nil
+}
+
+// forThisServer keeps the entries belonging to the server the editor is on.
+// An entry filed with no server at all is kept: dropping it would hide a copy
+// with no way to get it back.
+func (a *App) forThisServer(entries []safestore.Entry) []safestore.Entry {
+	a.fileMu.Lock()
+	current := a.activeServerID()
+	a.fileMu.Unlock()
+
+	if current == "" {
+		return entries
+	}
+	out := make([]safestore.Entry, 0, len(entries))
+	for _, e := range entries {
+		if e.Server == current || e.Server == "" {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // ListFileVersions returns the saved states of one file, newest first — the
@@ -1304,7 +1358,7 @@ func (a *App) ListFileVersions(serverID, remotePath string) ([]safestore.Entry, 
 		return nil, errors.New("local store unavailable")
 	}
 	if remotePath == "" {
-		return a.store.List(safestore.KindVersion), nil
+		return a.forThisServer(a.store.List(safestore.KindVersion)), nil
 	}
 	if serverID == "" {
 		// Under the lock for the same reason a save is: the shared client's
@@ -1504,6 +1558,98 @@ func (a *App) EmptyRecycleBin() error {
 	return a.store.Empty(safestore.KindBin)
 }
 
+// BinPolicy is one server's recycle-bin setting, for the Vault's list.
+type BinPolicy struct {
+	ServerID string `json:"server_id"`
+	Name     string `json:"name"`
+	Panel    string `json:"panel"`
+	Enabled  bool   `json:"enabled"`
+	// Explicit is false when this server is only following the default.
+	Explicit bool `json:"explicit"`
+	Current  bool `json:"current"`
+}
+
+// BinPolicySet is the whole picture: the default, and every server known.
+type BinPolicySet struct {
+	Default bool        `json:"default"`
+	Servers []BinPolicy `json:"servers"`
+	Partial bool        `json:"partial"`
+	Problem string      `json:"problem,omitempty"`
+}
+
+// GetBinPolicies lists every server across every panel with its recycle-bin
+// setting, so the Vault can show what is and is not being kept.
+func (a *App) GetBinPolicies() (*BinPolicySet, error) {
+	out := &BinPolicySet{
+		Default: a.config.RecycleBinDefaultEnabled(),
+		Servers: []BinPolicy{},
+	}
+	overrides := a.config.RecycleBinOverrides()
+
+	a.fileMu.Lock()
+	current := a.activeServerID()
+	a.fileMu.Unlock()
+
+	refs, err := a.ListAllServers()
+	if err != nil {
+		// One unreachable panel should not leave the list empty and the
+		// switches unusable, so say so and carry on with what is known.
+		out.Partial = true
+		out.Problem = err.Error()
+	}
+
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		on, explicit := overrides[ref.ID]
+		if !explicit {
+			on = out.Default
+		}
+		seen[ref.ID] = true
+		out.Servers = append(out.Servers, BinPolicy{
+			ServerID: ref.ID, Name: ref.Name, Panel: ref.Panel,
+			Enabled: on, Explicit: explicit, Current: ref.ID == current,
+		})
+	}
+
+	// A server that has been set but is no longer listed still has a setting,
+	// and hiding it would leave no way to clear it.
+	for id, on := range overrides {
+		if seen[id] {
+			continue
+		}
+		out.Servers = append(out.Servers, BinPolicy{
+			ServerID: id, Name: id, Panel: "no longer listed",
+			Enabled: on, Explicit: true, Current: id == current,
+		})
+	}
+
+	sort.Slice(out.Servers, func(i, j int) bool {
+		if out.Servers[i].Current != out.Servers[j].Current {
+			return out.Servers[i].Current
+		}
+		if out.Servers[i].Panel != out.Servers[j].Panel {
+			return out.Servers[i].Panel < out.Servers[j].Panel
+		}
+		return out.Servers[i].Name < out.Servers[j].Name
+	})
+	return out, nil
+}
+
+// SetBinPolicy turns the recycle bin on or off for one server.
+func (a *App) SetBinPolicy(serverID string, enabled bool) error {
+	return a.config.SetRecycleBinEnabled(serverID, enabled)
+}
+
+// ClearBinPolicy puts one server back on the default.
+func (a *App) ClearBinPolicy(serverID string) error {
+	return a.config.ClearRecycleBinOverride(serverID)
+}
+
+// SetBinPolicyDefault sets what a server nobody has configured does.
+func (a *App) SetBinPolicyDefault(enabled bool) error {
+	return a.config.SetRecycleBinDefault(enabled)
+}
+
 // SetRecycleBinLimitMB changes the bin's cap. The default is 100 MB.
 func (a *App) SetRecycleBinLimitMB(mb int64) error {
 	if a.store == nil {
@@ -1526,6 +1672,21 @@ func isNotFound(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "status 404") || strings.Contains(msg, "notfoundhttpexception")
+}
+
+// serverIDOrActive resolves an empty server id to whatever the editor is
+// pointed at. Used before fileMu is taken, so it only reads config-level
+// state and tolerates a racy answer: the authoritative resolution happens
+// under the lock inside withServerClient.
+func serverIDOrActive(a *App, serverID string) string {
+	if serverID != "" {
+		return serverID
+	}
+	cfg := a.config.GetConfig()
+	if cfg == nil {
+		return ""
+	}
+	return cfg.ServerID
 }
 
 // serverIDOr falls back to the client's own server ID when the caller passed
