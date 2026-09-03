@@ -704,9 +704,14 @@ type DeletePlan struct {
 	Truncated    bool  `json:"truncated"`
 	// BinEnabled is this server's recycle-bin policy. When it is off nothing
 	// is copied and every file in the plan is gone the moment it is deleted.
-	BinEnabled bool     `json:"bin_enabled"`
-	Warnings   []string `json:"warnings"`
-	Critical   []string `json:"critical"`
+	BinEnabled bool `json:"bin_enabled"`
+	// ConfirmStyle is the app setting the window should honour: "typed" asks
+	// for the word when there is no way back, "double" asks for two clicks
+	// whatever the case. It travels with the plan so the window does not have
+	// to fetch settings before it can put up a dialog.
+	ConfirmStyle string   `json:"confirm_style"`
+	Warnings     []string `json:"warnings"`
+	Critical     []string `json:"critical"`
 
 	createdAt time.Time
 }
@@ -767,15 +772,16 @@ func (a *App) PlanDelete(serverID string, paths []string) (*DeletePlan, error) {
 	binOn := a.config.RecycleBinEnabled(serverID)
 
 	plan := &DeletePlan{
-		BinEnabled: binOn,
-		ServerID:   serverID,
-		Roots:      cleanRoots,
-		Items:      []DeleteItem{},
-		Warnings:   []string{},
-		Critical:   []string{},
-		BinFree:    a.store.Free(safestore.KindBin),
-		BinLimit:   a.store.Limit(safestore.KindBin),
-		createdAt:  time.Now(),
+		BinEnabled:   binOn,
+		ConfirmStyle: a.deleteConfirmStyle(),
+		ServerID:     serverID,
+		Roots:        cleanRoots,
+		Items:        []DeleteItem{},
+		Warnings:     []string{},
+		Critical:     []string{},
+		BinFree:      a.store.Free(safestore.KindBin),
+		BinLimit:     a.store.Limit(safestore.KindBin),
+		createdAt:    time.Now(),
 	}
 
 	err := a.withServerClient(serverID, func(c *pterodactyl.Client, _ string) error {

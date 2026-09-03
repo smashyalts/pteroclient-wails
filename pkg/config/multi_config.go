@@ -28,6 +28,11 @@ type MultiConfig struct {
 	// RecycleBinDefault applies to a server nobody has set. Nil means on,
 	// which is what it was before this existed.
 	RecycleBinDefault *bool `json:"recycle_bin_default,omitempty"`
+	// App holds the settings that are about how the app behaves rather than
+	// about any one panel. Strings so that adding one does not need a
+	// migration; the app decides what each means and what a missing one
+	// defaults to.
+	App map[string]string `json:"app,omitempty"`
 	// Legacy fields for backward compatibility
 	LegacyPanelURL string `json:"panel_url,omitempty"`
 	LegacyAPIKey   string `json:"api_key,omitempty"`
@@ -454,6 +459,61 @@ func (mcm *MultiConfigManager) SetRecycleBinEnabled(serverID string, on bool) er
 		mcm.config.RecycleBin = map[string]bool{}
 	}
 	mcm.config.RecycleBin[serverID] = on
+	return mcm.saveLocked()
+}
+
+// ---------------------------------------------------------- app settings
+
+// AppSetting reads one setting, or fallback when it has never been set.
+func (mcm *MultiConfigManager) AppSetting(key, fallback string) string {
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
+
+	if mcm.config == nil || mcm.config.App == nil {
+		return fallback
+	}
+	if value, ok := mcm.config.App[key]; ok && value != "" {
+		return value
+	}
+	return fallback
+}
+
+// AppSettings returns everything that has been set.
+func (mcm *MultiConfigManager) AppSettings() map[string]string {
+	mcm.mu.RLock()
+	defer mcm.mu.RUnlock()
+
+	out := map[string]string{}
+	if mcm.config == nil {
+		return out
+	}
+	for key, value := range mcm.config.App {
+		out[key] = value
+	}
+	return out
+}
+
+// SetAppSetting stores one. An empty value removes it, so a setting can be put
+// back to its default rather than only to another value.
+func (mcm *MultiConfigManager) SetAppSetting(key, value string) error {
+	if key == "" {
+		return fmt.Errorf("no setting named")
+	}
+
+	mcm.mu.Lock()
+	defer mcm.mu.Unlock()
+
+	if mcm.config == nil {
+		return fmt.Errorf("config not initialized")
+	}
+	if mcm.config.App == nil {
+		mcm.config.App = map[string]string{}
+	}
+	if value == "" {
+		delete(mcm.config.App, key)
+	} else {
+		mcm.config.App[key] = value
+	}
 	return mcm.saveLocked()
 }
 

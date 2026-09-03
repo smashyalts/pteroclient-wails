@@ -2214,7 +2214,16 @@ function initApp() {
             // cannot hold. A folder that is fully copied first is recoverable,
             // and making people type DELETE for every one of those trained
             // them to type it without reading.
-            const strict = (plan.critical && plan.critical.length > 0) || !plan.recoverable;
+            // ...and the App settings tab decides whether it is ever asked
+            // for. Two people wanted different answers here — one arguing that
+            // no backup means more ceremony, the other that they have never
+            // once deleted something they needed — so it is a setting rather
+            // than a guess. "double" still shows exactly the same dialog and
+            // the same warnings; it just does not make you type.
+            const style = plan.confirm_style ||
+                (window.AppSettings ? window.AppSettings.deleteConfirm() : 'typed');
+            const strict = style !== 'double' &&
+                ((plan.critical && plan.critical.length > 0) || !plan.recoverable);
 
             if (strict) {
                 const v = await window.Shell.dialog.form('Delete ' + plan.roots.length + ' item(s)', [
@@ -2228,11 +2237,16 @@ function initApp() {
             } else {
                 // Two clicks rather than a typed word: enough that a stray
                 // click cannot delete anything, without the ceremony.
+                const noWayBack = (plan.critical && plan.critical.length > 0) || !plan.recoverable;
                 const ok = await window.Shell.dialog.open({
                     title: 'Delete ' + plan.roots.length + ' item(s)',
                     body: intro,
                     confirmLabel: 'Delete',
-                    confirmTwice: 'Click again to delete',
+                    // The second click says which case this is, since the only
+                    // difference between them is whether it can be undone.
+                    confirmTwice: noWayBack
+                        ? 'Click again — this cannot be undone'
+                        : 'Click again to delete',
                     danger: true
                 });
                 if (!ok) return;

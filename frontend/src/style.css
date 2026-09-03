@@ -2467,6 +2467,34 @@ body.console-window .logo-sub::after { content: " · console"; }
 
 /* A two-click confirm, armed. It has to look different from the resting
    state or the second click is a guess. */
+/* One choice in a settings group. The whole row is the target, not just the
+   radio, and the chosen one is obvious without reading it. */
+.setting-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 11px;
+    margin-bottom: 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    cursor: pointer;
+    transition: border-color .12s ease, background .12s ease;
+}
+
+.setting-option:last-of-type { margin-bottom: 0; }
+.setting-option:hover { border-color: var(--line-bright); }
+
+.setting-option.is-on {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.setting-option input[type="radio"] {
+    flex: none;
+    margin-top: 2px;
+    accent-color: var(--accent);
+}
+
 button.armed {
     outline: 2px solid var(--danger);
     outline-offset: 1px;

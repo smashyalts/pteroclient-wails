@@ -99,6 +99,7 @@
         <div class="rail-sep"></div>
         <button class="tab" data-tab="vault" data-icon="shield" type="button">Vault</button>
         <button class="tab" data-tab="appearance" data-icon="palette" type="button">Look</button>
+        <button class="tab" data-tab="appsettings" data-icon="sliders" type="button">App</button>
     </nav>
 
     <main class="stage">
@@ -319,6 +320,14 @@
             <div class="pane" id="appearanceBody"></div>
         </div>
 
+        <!-- App settings -------------------------------------------------- -->
+        <div id="appsettingsTab" class="tab-content">
+            <div class="toolbar">
+                <span class="toolbar-title">App settings</span>
+            </div>
+            <div class="pane" id="appSettingsBody"></div>
+        </div>
+
     </main>
 </div>
 
@@ -446,6 +455,7 @@
 <script src="./sftp.js"></script>
 <script src="./vault.js"></script>
 <script src="./appearance.js"></script>
+<script src="./appsettings.js"></script>
 <script src="./commands.js"></script>
 <script src="./session.js"></script>
 <script src="./console-mode.js"></script>

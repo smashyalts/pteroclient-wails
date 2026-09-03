@@ -65,7 +65,8 @@
             ['console', 'Console'], ['files', 'Files'], ['databases', 'Databases'],
             ['schedules', 'Schedules'], ['users', 'Users'], ['network', 'Network'],
             ['startup', 'Startup'], ['settings', 'Server settings'],
-            ['vault', 'Vault'], ['activity', 'Activity'], ['appearance', 'Look']
+            ['vault', 'Vault'], ['activity', 'Activity'], ['appearance', 'Look'],
+            ['appsettings', 'App settings']
         ];
         TABS.forEach((entry, i) => {
             R({
