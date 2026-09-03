@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"sort"
@@ -628,4 +629,151 @@ func (a *App) PickLocalFiles() ([]string, error) {
 		chosen = []string{}
 	}
 	return chosen, nil
+}
+
+/* ------------------------------------------------------------ local files */
+
+// LocalEntry is one thing in a folder on this machine.
+type LocalEntry struct {
+	Path    string `json:"path"`
+	Name    string `json:"name"`
+	Size    int64  `json:"size"`
+	IsDir   bool   `json:"is_dir"`
+	ModTime string `json:"mod_time"`
+}
+
+// LocalListing is one folder on this machine, for the local half of the
+// transfer view.
+type LocalListing struct {
+	Path    string       `json:"path"`
+	Parent  string       `json:"parent"`
+	Entries []LocalEntry `json:"entries"`
+	// Roots are the drives on this machine, so the view has somewhere to go
+	// when it is at the top.
+	Roots []string `json:"roots"`
+}
+
+// ListLocal reads a folder on this machine.
+//
+// An empty path means the user's home directory, which is where a transfer
+// view should open rather than at a drive root nobody keeps anything in.
+func (a *App) ListLocal(dir string) (*LocalListing, error) {
+	if strings.TrimSpace(dir) == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		dir = home
+	}
+
+	cleaned := filepath.Clean(dir)
+	items, err := os.ReadDir(cleaned)
+	if err != nil {
+		return nil, err
+	}
+
+	parent := filepath.Dir(cleaned)
+	if parent == cleaned {
+		// Already at a drive root; there is no up from here.
+		parent = ""
+	}
+
+	out := &LocalListing{
+		Path:    cleaned,
+		Parent:  parent,
+		Entries: []LocalEntry{},
+		Roots:   localRoots(),
+	}
+
+	for _, item := range items {
+		info, infoErr := item.Info()
+		if infoErr != nil {
+			// A file that cannot be stat'd is still worth listing; it just has
+			// no size or date.
+			out.Entries = append(out.Entries, LocalEntry{
+				Path:  filepath.Join(cleaned, item.Name()),
+				Name:  item.Name(),
+				IsDir: item.IsDir(),
+			})
+			continue
+		}
+		out.Entries = append(out.Entries, LocalEntry{
+			Path:    filepath.Join(cleaned, item.Name()),
+			Name:    item.Name(),
+			Size:    info.Size(),
+			IsDir:   item.IsDir(),
+			ModTime: info.ModTime().Format(time.RFC3339),
+		})
+	}
+
+	sort.SliceStable(out.Entries, func(i, j int) bool {
+		if out.Entries[i].IsDir != out.Entries[j].IsDir {
+			return out.Entries[i].IsDir
+		}
+		return strings.ToLower(out.Entries[i].Name) < strings.ToLower(out.Entries[j].Name)
+	})
+	return out, nil
+}
+
+// ListRemote reads a folder over SFTP, for the other half of the view.
+func (a *App) ListRemote(dir string) ([]sftpx.Entry, error) {
+	session, _, err := a.live()
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(dir) == "" {
+		dir = "/"
+	}
+	cleaned, err := normalizeRemotePath(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	items, err := session.List(ctx, cleaned)
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		if items[i].IsDir != items[j].IsDir {
+			return items[i].IsDir
+		}
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+	return items, nil
+}
+
+// RevealLocal opens a folder in the system file manager, for when the app is
+// not the right tool for what comes next.
+func (a *App) RevealLocal(dir string) error {
+	if a.ctx == nil {
+		return errors.New("no window")
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		dir = filepath.Dir(dir)
+	}
+	// Explorer only: this takes a path from the app's own UI, never from a
+	// server, and nothing else is passed to it.
+	return exec.Command("explorer", filepath.Clean(dir)).Start()
+}
+
+// localRoots lists the drives on this machine.
+func localRoots() []string {
+	roots := []string{}
+	if home, err := os.UserHomeDir(); err == nil {
+		roots = append(roots, home)
+	}
+	for letter := 'A'; letter <= 'Z'; letter++ {
+		drive := string(letter) + ":\\"
+		if _, err := os.Stat(drive); err == nil {
+			roots = append(roots, drive)
+		}
+	}
+	return roots
 }

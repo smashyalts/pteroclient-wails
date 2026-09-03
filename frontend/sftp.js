@@ -161,6 +161,25 @@
         }
         if (!dir) return null;
 
+        return downloadTo(remotePaths, dir);
+    }
+
+    /**
+     * Download into a folder that is already known.
+     *
+     * The transfer view has the destination on screen, so asking again would be
+     * a dialog whose answer is already visible.
+     */
+    async function downloadTo(remotePaths, dir) {
+        if (!status.connected) {
+            window.UX.toast.warn('Connect over SFTP first');
+            return null;
+        }
+        if (busy) {
+            window.UX.toast.warn('A transfer is already running');
+            return null;
+        }
+        if (!dir) return null;
         return run('download', () => go().SFTPDownload(remotePaths, dir));
     }
 
@@ -299,6 +318,7 @@
         disconnect: disconnect,
         upload: upload,
         download: download,
+        downloadTo: downloadTo,
         isConnected: () => !!status.connected,
         status: () => Object.assign({}, status)
     };

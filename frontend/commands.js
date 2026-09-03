@@ -64,7 +64,7 @@
         const TABS = [
             ['console', 'Console'], ['files', 'Files'], ['databases', 'Databases'],
             ['schedules', 'Schedules'], ['users', 'Users'], ['network', 'Network'],
-            ['startup', 'Startup'], ['settings', 'Server settings'],
+            ['startup', 'Startup'], ['settings', 'Server settings'], ['transfer', 'Transfer'],
             ['vault', 'Vault'], ['activity', 'Activity'], ['appearance', 'Look'],
             ['appsettings', 'App settings']
         ];

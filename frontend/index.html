@@ -93,6 +93,7 @@
         <button class="tab" data-tab="network" data-icon="network" type="button">Network</button>
         <button class="tab" data-tab="startup" data-icon="sliders" type="button">Startup</button>
         <button class="tab" data-tab="settings" data-icon="cog" type="button">Server</button>
+        <button class="tab" data-tab="transfer" data-icon="plug" type="button">Transfer</button>
         <!-- Activity is this server's audit log, so it belongs with the
              server's own tabs. Below the separator are the app's. -->
         <button class="tab" data-tab="activity" data-icon="activity" type="button">Activity</button>
@@ -320,6 +321,51 @@
             <div class="pane" id="appearanceBody"></div>
         </div>
 
+        <!-- Transfer ------------------------------------------------------ -->
+        <div id="transferTab" class="tab-content">
+            <div class="toolbar">
+                <span class="toolbar-title">Transfer</span>
+                <div class="tx-status" id="txStatus"></div>
+                <div class="spacer"></div>
+                <button id="txConnect" type="button">Connect</button>
+            </div>
+
+            <div class="tx-body">
+                <!-- This machine -->
+                <section class="tx-pane" data-pane="local">
+                    <header class="tx-head">
+                        <span class="eyebrow">This computer</span>
+                        <div class="spacer"></div>
+                        <span class="list-sub" id="tx-local-count"></span>
+                        <button class="sm" id="txLocalUp" type="button" title="Up one folder">Up</button>
+                        <button class="sm" id="txLocalRefresh" type="button">Refresh</button>
+                        <button class="sm" id="txReveal" type="button" title="Open in Explorer">Open</button>
+                    </header>
+                    <div class="tx-path mono" id="tx-local-path"></div>
+                    <div class="tx-list" id="tx-local-list"></div>
+                </section>
+
+                <!-- The direction buttons, between the two -->
+                <div class="tx-middle">
+                    <button id="txUpload" type="button" class="primary" title="Send the selected files to the server" disabled>&rarr;</button>
+                    <button id="txDownload" type="button" class="primary" title="Bring the selected files to this computer" disabled>&larr;</button>
+                </div>
+
+                <!-- The server -->
+                <section class="tx-pane" data-pane="remote">
+                    <header class="tx-head">
+                        <span class="eyebrow">The server</span>
+                        <div class="spacer"></div>
+                        <span class="list-sub" id="tx-remote-count"></span>
+                        <button class="sm" id="txRemoteUp" type="button" title="Up one folder">Up</button>
+                        <button class="sm" id="txRemoteRefresh" type="button">Refresh</button>
+                    </header>
+                    <div class="tx-path mono" id="tx-remote-path"></div>
+                    <div class="tx-list" id="tx-remote-list"></div>
+                </section>
+            </div>
+        </div>
+
         <!-- App settings -------------------------------------------------- -->
         <div id="appsettingsTab" class="tab-content">
             <div class="toolbar">
@@ -453,6 +499,7 @@
 <script src="./panel-tabs.js"></script>
 <script src="./split-view.js"></script>
 <script src="./sftp.js"></script>
+<script src="./transfer.js"></script>
 <script src="./vault.js"></script>
 <script src="./appearance.js"></script>
 <script src="./appsettings.js"></script>
