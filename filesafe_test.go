@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sort"
 	"strings"
 	"testing"
 )
@@ -220,5 +221,98 @@ func TestHumanBytes(t *testing.T) {
 		if got := humanBytes(in); got != want {
 			t.Errorf("humanBytes(%d) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// A selection containing both a folder and something inside it used to plan
+// the inner path twice, then delete it twice — the second attempt failing
+// against a parent that was already gone, which took the whole operation's
+// recycle-bin copies with it.
+func TestCollapseNested(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{
+			name: "child inside a selected folder is dropped",
+			in:   []string{"/plugins", "/plugins/config.yml"},
+			want: []string{"/plugins"},
+		},
+		{
+			name: "grandchild too",
+			in:   []string{"/plugins", "/plugins/Essentials/config.yml"},
+			want: []string{"/plugins"},
+		},
+		{
+			name: "siblings are all kept",
+			in:   []string{"/logs", "/plugins", "/world"},
+			want: []string{"/logs", "/plugins", "/world"},
+		},
+		{
+			name: "a prefix that is not a path boundary is not nesting",
+			in:   []string{"/plugins", "/pluginsX", "/plugins-old"},
+			want: []string{"/plugins", "/plugins-old", "/pluginsX"},
+		},
+		{
+			name: "the root swallows everything",
+			in:   []string{"/", "/a", "/b/c"},
+			want: []string{"/"},
+		},
+		{
+			name: "deeper duplicates collapse to the shallowest",
+			in:   []string{"/a", "/a/b", "/a/b/c", "/a/b/c/d"},
+			want: []string{"/a"},
+		},
+	}
+
+	for _, c := range cases {
+		in := append([]string(nil), c.in...)
+		sort.Strings(in)
+		got := collapseNested(in)
+		if len(got) != len(c.want) {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+				break
+			}
+		}
+	}
+}
+
+// Every planned file has to be attributable to the root that was selected, or
+// a failure on one root cannot roll back only its own copies.
+func TestOwnerRoot(t *testing.T) {
+	roots := []string{"/logs", "/plugins", "/plugins-old"}
+
+	cases := map[string]string{
+		"/plugins":                       "/plugins",
+		"/plugins/config.yml":            "/plugins",
+		"/plugins/Essentials/config.yml": "/plugins",
+		"/plugins-old/config.yml":        "/plugins-old",
+		"/logs/latest.log":               "/logs",
+		"/world/level.dat":               "",
+		"/pluginsX/thing.yml":            "",
+	}
+
+	for path, want := range cases {
+		if got := ownerRoot(roots, path); got != want {
+			t.Errorf("ownerRoot(%q) = %q, want %q", path, got, want)
+		}
+	}
+}
+
+// When one root nests inside another the deeper one wins, so a rollback
+// scoped to it does not reach outside.
+func TestOwnerRootPrefersTheDeepestMatch(t *testing.T) {
+	roots := []string{"/a", "/a/b"}
+	if got := ownerRoot(roots, "/a/b/c.txt"); got != "/a/b" {
+		t.Errorf("ownerRoot returned %q, want the deeper /a/b", got)
+	}
+	if got := ownerRoot(roots, "/a/other.txt"); got != "/a" {
+		t.Errorf("ownerRoot returned %q, want /a", got)
 	}
 }

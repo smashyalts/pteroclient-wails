@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -685,4 +686,95 @@ func (c *Client) DecompressFile(root, file string) error {
 		return fmt.Errorf("API returned status %d: %s", resp.StatusCode(), resp.String())
 	}
 	return nil
+}
+
+// downloadHTTP fetches signed node URLs. Separate from the API client because
+// those transfers are whole files rather than JSON: no auth header (the URL
+// carries its own token) and no 30 second ceiling.
+var downloadHTTP = &http.Client{Timeout: 30 * time.Minute}
+
+// openDownload resolves a file to its signed URL and starts the transfer.
+//
+// /files/contents is the file *editor* endpoint and the panel caps it — a zip
+// or a jar comes back as FileSizeTooLargeException. /files/download has no such
+// cap; it hands out a short-lived URL pointing at the node, which is what the
+// panel's own download button uses.
+func (c *Client) openDownload(remotePath string) (*http.Response, error) {
+	signed, err := c.GetDownloadURL(remotePath)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := downloadHTTP.Get(signed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download %s: %w", remotePath, err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		resp.Body.Close()
+		return nil, fmt.Errorf("download returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return resp, nil
+}
+
+// DownloadFileTo streams a file straight onto the local disk. Nothing is held
+// in memory, so the size of the file is not the size of the process.
+func (c *Client) DownloadFileTo(remotePath, localPath string) (int64, error) {
+	resp, err := c.openDownload(remotePath)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	out, err := os.Create(localPath)
+	if err != nil {
+		return 0, fmt.Errorf("cannot write %s: %w", localPath, err)
+	}
+
+	written, copyErr := io.Copy(out, resp.Body)
+	closeErr := out.Close()
+
+	if copyErr != nil {
+		// A partial file is worse than none: it looks like a download that
+		// worked until something tries to open it.
+		os.Remove(localPath)
+		return 0, fmt.Errorf("download of %s was interrupted: %w", remotePath, copyErr)
+	}
+	if closeErr != nil {
+		os.Remove(localPath)
+		return 0, closeErr
+	}
+	return written, nil
+}
+
+// DownloadFileBytes reads a file into memory through the download endpoint,
+// refusing anything over limit. Used where the bytes have to be handed on —
+// a copy to another server, a copy into the local store — rather than saved.
+func (c *Client) DownloadFileBytes(remotePath string, limit int64) ([]byte, error) {
+	resp, err := c.openDownload(remotePath)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if limit > 0 && resp.ContentLength > limit {
+		return nil, fmt.Errorf("%s is %d bytes, over the %d byte limit", remotePath, resp.ContentLength, limit)
+	}
+
+	// One byte past the limit, so a body with no Content-Length is caught too
+	// rather than read forever.
+	reader := io.Reader(resp.Body)
+	if limit > 0 {
+		reader = io.LimitReader(resp.Body, limit+1)
+	}
+
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read %s: %w", remotePath, err)
+	}
+	if limit > 0 && int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s is over the %d byte limit", remotePath, limit)
+	}
+	return data, nil
 }

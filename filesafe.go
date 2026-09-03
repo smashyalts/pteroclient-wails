@@ -269,12 +269,15 @@ func (a *App) captureRemote(kind safestore.Kind, c *pterodactyl.Client, panel, s
 		return a.store.Put(kind, meta, nil)
 	}
 
-	content, err := c.GetFileContent(remotePath)
+	// The download endpoint rather than /files/contents: the latter is the
+	// file editor's, and the panel refuses anything past a few megabytes with
+	// FileSizeTooLargeException — so the store could never hold a jar or a zip.
+	content, err := c.DownloadFileBytes(remotePath, safestore.MaxSingleCapture)
 	if err != nil {
 		return safestore.Entry{}, err
 	}
 
-	entry, err := a.store.Put(kind, meta, []byte(content))
+	entry, err := a.store.Put(kind, meta, content)
 	if errors.Is(err, safestore.ErrTooLarge) {
 		meta.Note = err.Error()
 		return a.store.Put(kind, meta, nil)
@@ -609,6 +612,7 @@ func (a *App) PlanDelete(serverID string, paths []string) (*DeletePlan, error) {
 		}
 	}
 	sort.Strings(cleanRoots)
+	cleanRoots = collapseNested(cleanRoots)
 
 	a.fileMu.Lock()
 	defer a.fileMu.Unlock()
@@ -723,6 +727,45 @@ func (a *App) PlanDelete(serverID string, paths []string) (*DeletePlan, error) {
 	return plan, nil
 }
 
+// collapseNested drops any path that already sits inside another in the set.
+//
+// Selecting a folder and something inside it is ordinary, and without this the
+// inner path is planned twice — captured twice, counted twice — and then
+// deleted twice, the second time against a parent that is already gone. That
+// failure used to take the whole operation's recycle-bin copies with it.
+//
+// The input is sorted, so an ancestor always precedes its descendants.
+func collapseNested(sorted []string) []string {
+	out := make([]string, 0, len(sorted))
+	for _, candidate := range sorted {
+		covered := false
+		for _, kept := range out {
+			if candidate == kept || strings.HasPrefix(candidate, strings.TrimSuffix(kept, "/")+"/") {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, candidate)
+		}
+	}
+	return out
+}
+
+// ownerRoot returns the selected root a planned item belongs to, so a failure
+// on one root only rolls back that root's copies.
+func ownerRoot(roots []string, itemPath string) string {
+	best := ""
+	for _, root := range roots {
+		if itemPath == root || strings.HasPrefix(itemPath, strings.TrimSuffix(root, "/")+"/") {
+			if len(root) > len(best) {
+				best = root
+			}
+		}
+	}
+	return best
+}
+
 func (a *App) addPlanFile(plan *DeletePlan, fullPath, name string, size int64) {
 	level, why := classifyPath(fullPath, false)
 	capturable := size <= safestore.MaxSingleCapture
@@ -805,6 +848,7 @@ type DeleteOutcome struct {
 	Deleted  []string `json:"deleted"`
 	Captured int      `json:"captured"`
 	Skipped  []string `json:"skipped"`
+	Failed   []string `json:"failed"`
 	Batch    string   `json:"batch"`
 	BinUsed  int64    `json:"bin_used"`
 	BinLimit int64    `json:"bin_limit"`
@@ -841,6 +885,7 @@ func (a *App) SafeDeleteFiles(token string) (*DeleteOutcome, error) {
 	outcome := &DeleteOutcome{
 		Deleted: []string{},
 		Skipped: []string{},
+		Failed:  []string{},
 	}
 
 	// One id for the whole operation, so a folder that deleted into 200 bin
@@ -855,7 +900,13 @@ func (a *App) SafeDeleteFiles(token string) (*DeleteOutcome, error) {
 		// the same kind of thing, before touching anything — a file that was
 		// replaced by a directory (or by a different file of the same name)
 		// since the dialog opened is not what the user agreed to delete.
-		byDir := map[string][]string{}
+		//
+		// Item kinds are looked up once rather than scanned per root.
+		wasDirOf := map[string]bool{}
+		for _, item := range plan.Items {
+			wasDirOf[item.Path] = item.IsDir
+		}
+
 		for _, root := range plan.Roots {
 			dir, name, err := splitRemote(root)
 			if err != nil {
@@ -878,32 +929,32 @@ func (a *App) SafeDeleteFiles(token string) (*DeleteOutcome, error) {
 				return fmt.Errorf("%s is no longer there — nothing was deleted; refresh and try again", root)
 			}
 
-			wasDir := false
-			for _, item := range plan.Items {
-				if item.Path == root {
-					wasDir = item.IsDir
-					break
-				}
-			}
-			if isDir := !found.IsFile && !found.IsSymlink; isDir != wasDir {
+			if isDir := !found.IsFile && !found.IsSymlink; isDir != wasDirOf[root] {
 				return fmt.Errorf("%s changed between the preview and now — nothing was deleted; refresh and try again", root)
 			}
-
-			byDir[dir] = append(byDir[dir], name)
 		}
 
-		// Capture second. A file we cannot copy is reported, not silently lost.
-		captured := []string{}
-		rollback := func() {
-			for _, id := range captured {
+		// Capture second, tracked per root. A root whose delete later fails
+		// gets its copies rolled back; a root that succeeded keeps them,
+		// because those files really are gone. Rolling back everything on any
+		// failure used to erase the only copies of files already deleted.
+		capturedByRoot := map[string][]string{}
+		rollback := func(root string) {
+			for _, id := range capturedByRoot[root] {
 				_ = a.store.Remove(safestore.KindBin, id)
 			}
+			delete(capturedByRoot, root)
+		}
+
+		record := func(root, id string) {
+			capturedByRoot[root] = append(capturedByRoot[root], id)
 		}
 
 		for _, item := range plan.Items {
 			if item.IsDir {
 				continue
 			}
+			root := ownerRoot(plan.Roots, item.Path)
 
 			meta := safestore.Entry{
 				Panel:  panelName,
@@ -914,60 +965,67 @@ func (a *App) SafeDeleteFiles(token string) (*DeleteOutcome, error) {
 			}
 
 			if !item.Capturable {
+				meta.Note = fmt.Sprintf("%d bytes, over the capture limit", item.Size)
 				entry, err := a.store.Put(safestore.KindBin, meta, nil)
 				if err != nil {
-					rollback()
 					return err
 				}
-				captured = append(captured, entry.ID)
+				record(root, entry.ID)
 				outcome.Skipped = append(outcome.Skipped, item.Path)
 				continue
 			}
 
-			content, err := c.GetFileContent(item.Path)
+			// The download endpoint, not the editor one: /files/contents is
+			// capped by the panel and refuses anything sizeable.
+			content, err := c.DownloadFileBytes(item.Path, safestore.MaxSingleCapture)
 			if err != nil {
 				meta.Note = "could not be read before deletion: " + err.Error()
 				entry, putErr := a.store.Put(safestore.KindBin, meta, nil)
 				if putErr != nil {
-					rollback()
 					return putErr
 				}
-				captured = append(captured, entry.ID)
+				record(root, entry.ID)
 				outcome.Skipped = append(outcome.Skipped, item.Path)
 				continue
 			}
 
-			entry, err := a.store.Put(safestore.KindBin, meta, []byte(content))
+			entry, err := a.store.Put(safestore.KindBin, meta, content)
 			if err != nil {
 				if errors.Is(err, safestore.ErrTooLarge) {
 					meta.Note = err.Error()
 					placeholder, putErr := a.store.Put(safestore.KindBin, meta, nil)
 					if putErr != nil {
-						rollback()
 						return putErr
 					}
-					captured = append(captured, placeholder.ID)
+					record(root, placeholder.ID)
 					outcome.Skipped = append(outcome.Skipped, item.Path)
 					continue
 				}
-				rollback()
+				rollback(root)
 				return fmt.Errorf("refusing to delete: the recycle bin copy of %s failed: %w", item.Path, err)
 			}
-			captured = append(captured, entry.ID)
+			record(root, entry.ID)
 			outcome.Captured++
 		}
 
-		// Delete last, grouped by directory the way the panel's route expects.
-		for dir, names := range byDir {
-			if err := c.DeleteFiles(dir, names); err != nil {
-				// Nothing was removed under this root, so the copies taken for
-				// it would be bin entries for files that still exist.
-				rollback()
-				return fmt.Errorf("delete failed in %s: %w", dir, err)
+		// Delete last, one root at a time so a failure is isolated to the root
+		// that caused it. Grouping by directory would put two roots in one
+		// request and make a partial failure impossible to attribute.
+		for _, root := range plan.Roots {
+			dir, name, splitErr := splitRemote(root)
+			if splitErr != nil {
+				outcome.Failed = append(outcome.Failed, root+" — "+splitErr.Error())
+				rollback(root)
+				continue
 			}
-			for _, n := range names {
-				outcome.Deleted = append(outcome.Deleted, joinRemote(dir, n))
+			if err := c.DeleteFiles(dir, []string{name}); err != nil {
+				// This root is still there, so its copies would be bin entries
+				// for files that exist. The other roots keep theirs.
+				rollback(root)
+				outcome.Failed = append(outcome.Failed, root+" — "+err.Error())
+				continue
 			}
+			outcome.Deleted = append(outcome.Deleted, root)
 		}
 		return nil
 	})
@@ -1120,14 +1178,16 @@ func (a *App) restoreOne(c *pterodactyl.Client, panel string, entry safestore.En
 
 	files, listErr := c.ListFiles(dir)
 	if listErr != nil {
-		// The directory the file lived in was deleted along with it. Put it
-		// back, then carry on: without this, restoring anything from a deleted
-		// folder failed on the listing it could never do.
-		if dir == "/" {
+		// Only a genuine "no such directory" means the folder went with the
+		// file. Any other failure — a timeout, a 500, a permission problem —
+		// leaves us unable to tell whether something is already there, and
+		// carrying on with an empty listing would skip the overwrite guard and
+		// write straight over it.
+		if dir == "/" || !isNotFound(listErr) {
 			return fmt.Errorf("cannot list %s before restoring: %w", dir, listErr)
 		}
 		if mkErr := c.CreateDirectory("/", strings.TrimPrefix(dir, "/")); mkErr != nil {
-			return fmt.Errorf("cannot list or recreate %s: %v (%w)", dir, mkErr, listErr)
+			return fmt.Errorf("cannot recreate %s: %v (%w)", dir, mkErr, listErr)
 		}
 		files = nil
 	}
@@ -1613,7 +1673,7 @@ func (a *App) CopyFileBetweenServers(srcServer, srcPath, dstServer, dstDir strin
 	a.fileMu.Lock()
 	defer a.fileMu.Unlock()
 
-	var payload string
+	var payload []byte
 	var size int64
 
 	// Read from the source.
@@ -1639,11 +1699,16 @@ func (a *App) CopyFileBetweenServers(srcServer, srcPath, dstServer, dstDir strin
 			size = files[i].Size
 			break
 		}
-		content, readErr := c.GetFileContent(cleanSrc)
+		// Through the download endpoint: /files/contents is the editor's and
+		// the panel caps it, so a jar or a zip could never be dragged across.
+		content, readErr := c.DownloadFileBytes(cleanSrc, safestore.MaxSingleCapture)
 		if readErr != nil {
 			return readErr
 		}
 		payload = content
+		if size == 0 {
+			size = int64(len(content))
+		}
 		return nil
 	})
 	if err != nil {
@@ -1681,7 +1746,13 @@ func (a *App) CopyFileBetweenServers(srcServer, srcPath, dstServer, dstDir strin
 		if out.Conflict {
 			return nil
 		}
-		return c.SaveFileContent(dstPath, payload)
+		// UploadFile rather than SaveFileContent: the write endpoint is the
+		// editor's counterpart and treats the body as text.
+		dstDirOfFile, dstName, splitErr := splitRemote(dstPath)
+		if splitErr != nil {
+			return splitErr
+		}
+		return c.UploadFile(dstDirOfFile, dstName, bytes.NewReader(payload))
 	})
 	if err != nil {
 		return nil, err
@@ -1706,10 +1777,14 @@ const MaxDownloadBytes int64 = 256 << 20
 
 // DownloadToDisk saves panel files onto this machine.
 //
-// One file gets a Save-as dialog; anything else asks for a folder and writes
-// into it. A directory in the selection is archived on the panel first and the
-// archive is what comes down — the client API serves files, not trees — and the
-// archive is removed afterwards, since the app made it rather than the user.
+// One file comes down on its own. Anything else — several files, or a folder —
+// is archived on the panel first and arrives as a single archive, which is both
+// what people expect from a multi-select and the only way the client API can
+// hand over a directory at all.
+//
+// The transfer goes through /files/download, not /files/contents: the latter is
+// the file editor's endpoint and the panel caps it, which is why a zip used to
+// come back as FileSizeTooLargeException.
 func (a *App) DownloadToDisk(paths []string) (*DownloadOutcome, error) {
 	if len(paths) == 0 {
 		return nil, errors.New("nothing selected")
@@ -1719,6 +1794,7 @@ func (a *App) DownloadToDisk(paths []string) (*DownloadOutcome, error) {
 	}
 
 	cleaned := make([]string, 0, len(paths))
+	seen := map[string]bool{}
 	for _, p := range paths {
 		norm, err := normalizeRemotePath(p)
 		if err != nil {
@@ -1727,21 +1803,25 @@ func (a *App) DownloadToDisk(paths []string) (*DownloadOutcome, error) {
 		if _, _, err := splitRemote(norm); err != nil {
 			return nil, err
 		}
-		cleaned = append(cleaned, norm)
+		if !seen[norm] {
+			seen[norm] = true
+			cleaned = append(cleaned, norm)
+		}
 	}
+	sort.Strings(cleaned)
+	cleaned = collapseNested(cleaned)
 
-	// Work out what each path is before asking where to put it, so the dialog
-	// is not shown for a selection that cannot be downloaded at all.
-	type item struct {
-		path      string
-		name      string
-		isDir     bool
-		size      int64
-		temporary bool // an archive this call created, to be removed after
-	}
-
-	items := make([]item, 0, len(cleaned))
 	outcome := &DownloadOutcome{Files: []string{}, Skipped: []string{}}
+
+	// Look at what was selected before asking where to put it, so the dialog is
+	// not shown for something that cannot be downloaded at all.
+	type entry struct {
+		path  string
+		name  string
+		isDir bool
+		size  int64
+	}
+	items := make([]entry, 0, len(cleaned))
 
 	a.fileMu.Lock()
 	err := a.withServerClient("", func(c *pterodactyl.Client, _ string) error {
@@ -1761,7 +1841,7 @@ func (a *App) DownloadToDisk(paths []string) (*DownloadOutcome, error) {
 			if found == nil {
 				return fmt.Errorf("%s no longer exists — refresh the file list", p)
 			}
-			items = append(items, item{
+			items = append(items, entry{
 				path:  p,
 				name:  name,
 				isDir: !found.IsFile && !found.IsSymlink,
@@ -1775,112 +1855,96 @@ func (a *App) DownloadToDisk(paths []string) (*DownloadOutcome, error) {
 		return nil, err
 	}
 
-	// Where to.
 	single := len(items) == 1 && !items[0].isDir
-	var targetDir, targetFile string
 
+	// Name the save dialog before doing any work, so cancelling costs nothing.
+	suggested := "download.tar.gz"
 	if single {
-		chosen, dlgErr := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-			Title:           "Save " + items[0].name,
-			DefaultFilename: items[0].name,
-		})
-		if dlgErr != nil {
-			return nil, dlgErr
+		suggested = items[0].name
+	} else if len(items) == 1 {
+		suggested = archiveBaseName(items[0].name) + ".tar.gz"
+	} else if dir, _, dirErr := splitRemote(items[0].path); dirErr == nil {
+		folder := path.Base(dir)
+		if folder == "/" || folder == "." {
+			folder = "files"
 		}
-		if chosen == "" {
-			outcome.Cancelled = true
-			return outcome, nil
-		}
-		targetFile = chosen
-		targetDir = filepath.Dir(chosen)
-	} else {
-		chosen, dlgErr := runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
-			Title: "Save " + fmt.Sprintf("%d item(s)", len(items)) + " into…",
-		})
-		if dlgErr != nil {
-			return nil, dlgErr
-		}
-		if chosen == "" {
-			outcome.Cancelled = true
-			return outcome, nil
-		}
-		targetDir = chosen
+		suggested = folder + ".tar.gz"
 	}
-	outcome.Directory = targetDir
 
-	// Archive the folders, download everything, then clean up what we made.
+	chosen, dlgErr := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "Save " + suggested,
+		DefaultFilename: sanitizeLocalName(suggested),
+	})
+	if dlgErr != nil {
+		return nil, dlgErr
+	}
+	if chosen == "" {
+		outcome.Cancelled = true
+		return outcome, nil
+	}
+	outcome.Directory = filepath.Dir(chosen)
+
 	a.fileMu.Lock()
 	defer a.fileMu.Unlock()
 
 	err = a.withServerClient("", func(c *pterodactyl.Client, _ string) error {
-		for i := range items {
-			if !items[i].isDir {
-				continue
+		source := ""
+		temporary := false
+
+		if single {
+			source = items[0].path
+		} else {
+			// One archive for the whole selection. CompressFiles takes a single
+			// root and names within it, which is what a tree selection always
+			// is, and collapseNested has already removed anything doubled up.
+			root, _, splitErr := splitRemote(items[0].path)
+			if splitErr != nil {
+				return splitErr
 			}
-			dir, name, _ := splitRemote(items[i].path)
-			attrs, compressErr := c.CompressFiles(dir, []string{name})
+			names := make([]string, 0, len(items))
+			for _, it := range items {
+				dir, name, err := splitRemote(it.path)
+				if err != nil {
+					return err
+				}
+				if dir != root {
+					return fmt.Errorf("everything downloaded together has to be in one folder; %s is not in %s", it.path, root)
+				}
+				names = append(names, name)
+			}
+
+			attrs, compressErr := c.CompressFiles(root, names)
 			if compressErr != nil {
-				outcome.Skipped = append(outcome.Skipped, items[i].path+" — could not be archived: "+compressErr.Error())
-				items[i].name = ""
-				continue
+				return fmt.Errorf("could not archive the selection: %w", compressErr)
 			}
 			archive, _ := attrs["name"].(string)
 			if archive == "" {
-				outcome.Skipped = append(outcome.Skipped, items[i].path+" — the panel did not name the archive")
-				items[i].name = ""
-				continue
+				return errors.New("the panel did not say what it named the archive")
 			}
-			items[i].path = joinRemote(dir, archive)
-			items[i].name = archive
-			items[i].temporary = true
-			if size, ok := attrs["size"].(float64); ok {
-				items[i].size = int64(size)
+			source = joinRemote(root, archive)
+			temporary = true
+		}
+
+		written, dlErr := c.DownloadFileTo(source, chosen)
+
+		// The archive was this call's doing, so this call takes it back —
+		// whether or not the download worked.
+		if temporary {
+			dir, name, splitErr := splitRemote(source)
+			if splitErr == nil {
+				if delErr := c.DeleteFiles(dir, []string{name}); delErr != nil {
+					outcome.Skipped = append(outcome.Skipped,
+						"left "+source+" on the server: "+delErr.Error())
+				}
 			}
 		}
 
-		for _, it := range items {
-			if it.name == "" {
-				continue
-			}
-			if it.size > MaxDownloadBytes {
-				outcome.Skipped = append(outcome.Skipped,
-					it.path+" — "+humanBytes(it.size)+", over the "+humanBytes(MaxDownloadBytes)+" limit")
-				continue
-			}
-
-			content, readErr := c.GetFileContent(it.path)
-			if readErr != nil {
-				outcome.Skipped = append(outcome.Skipped, it.path+" — "+readErr.Error())
-				continue
-			}
-
-			dest := targetFile
-			if dest == "" {
-				dest = filepath.Join(targetDir, sanitizeLocalName(it.name))
-			}
-			if writeErr := os.WriteFile(dest, []byte(content), 0o644); writeErr != nil {
-				outcome.Skipped = append(outcome.Skipped, it.path+" — "+writeErr.Error())
-				continue
-			}
-
-			outcome.Files = append(outcome.Files, dest)
-			outcome.Bytes += int64(len(content))
+		if dlErr != nil {
+			return dlErr
 		}
 
-		// The archives were this call's doing, so this call takes them back.
-		for _, it := range items {
-			if !it.temporary || it.name == "" {
-				continue
-			}
-			dir, name, splitErr := splitRemote(it.path)
-			if splitErr != nil {
-				continue
-			}
-			if delErr := c.DeleteFiles(dir, []string{name}); delErr != nil {
-				outcome.Skipped = append(outcome.Skipped,
-					"left "+it.path+" on the server: "+delErr.Error())
-			}
-		}
+		outcome.Files = append(outcome.Files, chosen)
+		outcome.Bytes = written
 		return nil
 	})
 	if err != nil {

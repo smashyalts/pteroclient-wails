@@ -850,6 +850,11 @@ function initApp() {
             
             if (!isParent && !file.isDir) {
                 div.setAttribute('draggable', 'true');
+                // The signed URL has to be on the dataTransfer synchronously,
+                // but the panel issues it over the network — so it is fetched
+                // on hover as well as on selection, which covers dragging a row
+                // without clicking it first.
+                div.addEventListener('mouseenter', () => this.prefetchDownloadURL(entry));
                 div.addEventListener('dragstart', (e) => {
                     const url = this.downloadURLs && this.downloadURLs.get(fullPath);
                     if (url) {
@@ -1642,7 +1647,13 @@ function initApp() {
                     });
 
                 if (answer) {
-                    const again = items.filter(i => result.conflicts.some(c => c.endsWith('/' + i.rel_path) || c.endsWith(i.rel_path)));
+                    // Exact paths, not a suffix test. "/dir/sub/one.txt"
+                    // ends with "one.txt", so matching loosely re-sent a
+                    // different one.txt with overwrite set and replaced a file
+                    // the prompt never mentioned.
+                    const base = this.currentPath === '/' ? '' : this.currentPath;
+                    const wanted = new Set(result.conflicts);
+                    const again = items.filter(i => wanted.has(base + '/' + i.rel_path));
                     const retry = window.UX.toast.show('Replacing ' + again.length + ' file(s)…', { duration: 600000 });
                     try {
                         const second = await window.go.main.App.UploadBatch(this.currentPath, again, true, !!answer.keep);
@@ -1866,12 +1877,21 @@ function initApp() {
                     }
                 } : null;
 
+                // A delete can now partly succeed: each selected root is
+                // removed on its own, so one failure no longer takes the rest
+                // of the operation — or their recycle-bin copies — with it.
+                if (outcome.failed && outcome.failed.length) {
+                    await this.say('Some of that could not be deleted',
+                        outcome.deleted.length + ' removed, ' + outcome.failed.length + ' left alone:\n' +
+                        outcome.failed.join('\n'));
+                }
+
                 if (outcome.skipped && outcome.skipped.length) {
                     window.UX.toast.warn(
                         outcome.captured + ' in the recycle bin, ' + outcome.skipped.length +
                         ' could not be copied first and are gone for good',
                         { action: undo });
-                } else {
+                } else if (outcome.captured > 0 || outcome.deleted.length) {
                     window.UX.toast.ok(
                         outcome.captured + ' file' + (outcome.captured === 1 ? '' : 's') + ' moved to the recycle bin',
                         { action: undo });
@@ -2014,9 +2034,14 @@ function initApp() {
                 return;
             }
 
+            // One file comes down as itself; anything else is archived on the
+            // panel first and arrives as a single file.
             const folders = Array.from(this.selection.values()).filter(e => e.isDir).length;
+            const asArchive = paths.length > 1 || folders > 0;
+
             const busy = window.UX.toast.show(
-                folders ? 'Archiving and downloading…' : 'Downloading…', { duration: 120000 });
+                asArchive ? 'Archiving ' + paths.length + ' item(s) and downloading…' : 'Downloading…',
+                { duration: 600000 });
 
             try {
                 const out = await window.go.main.App.DownloadToDisk(paths);
@@ -2025,15 +2050,12 @@ function initApp() {
                 if (out.cancelled) return;
 
                 if (out.files.length) {
-                    window.UX.toast.ok(
-                        out.files.length + ' saved to ' + out.directory +
-                        ' (' + this.formatSize(out.bytes) + ')');
+                    window.UX.toast.ok('Saved ' + out.files[0] + ' (' + this.formatSize(out.bytes) + ')');
+                } else {
+                    window.UX.toast.warn('Nothing was downloaded');
                 }
                 if (out.skipped && out.skipped.length) {
-                    await this.say('Some files did not come down', out.skipped.join('\n'));
-                }
-                if (!out.files.length && !(out.skipped || []).length) {
-                    window.UX.toast.warn('Nothing was downloaded');
+                    await this.say('Note', out.skipped.join('\n'));
                 }
             } catch (err) {
                 busy.dismiss();
