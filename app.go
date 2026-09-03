@@ -48,6 +48,13 @@ type App struct {
 	// a binding call may be reading it.
 	consoleMu sync.Mutex
 
+	// One search at a time. Starting another cancels the one running, whose
+	// workers would otherwise go on listing folders for a window that has
+	// moved on.
+	searchMu     sync.Mutex
+	searchCancel func()
+	searchRun    uint64
+
 	// Set when this process was launched as a console window rather than the
 	// main app. See main.go and OpenConsoleWindow.
 	consoleOnly      bool

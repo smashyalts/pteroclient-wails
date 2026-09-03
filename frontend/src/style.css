@@ -2464,6 +2464,10 @@ body.console-window .logo-sub::after { content: " · console"; }
 }
 
 .search-head button { margin-left: auto; }
+
+/* Shown only while the walk is still running. */
+.search-spin { display: inline-flex; color: var(--accent); }
+.search-spin[hidden] { display: none; }
 .search-warn { color: var(--warning-text); }
 
 .search-where {

@@ -356,6 +356,10 @@ function initApp() {
             window.runtime.EventsOn('console-output', (message) => {
                 this.appendConsole(message);
             });
+
+            window.runtime.EventsOn('search-progress', (update) => {
+                this.onSearchProgress(update);
+            });
             
             window.runtime.EventsOn('console-error', (error) => {
                 this.appendConsole('[ERROR] ' + error, 'error');
@@ -800,28 +804,38 @@ function initApp() {
          * Walks everything below the current folder for `query`.
          *
          * The panel has no search endpoint, so this is one listing request per
-         * folder, breadth first and bounded — the backend stops at 600 folders,
-         * 400 matches or twenty seconds and says which.
+         * folder. The backend runs eight of them at once and reports matches as
+         * it finds them, so results appear while the walk is still going rather
+         * than all at the end.
          */
         async searchTree(query) {
             const needle = String(query || '').trim();
             if (!needle) return;
 
             const root = this.currentPath || '/';
-            const busy = window.UX.toast.show('Searching everything under ' + root + '…', { duration: 60000 });
+
+            // An empty frame first, so there is somewhere for hits to land the
+            // moment the first one arrives.
+            this.searchResults = {
+                query: needle, root: root, hits: [], folders: 0, scanned: 0,
+                truncated: false, reason: '', running: true
+            };
+            this.renderSearchResults(this.searchResults);
 
             let result;
             try {
                 result = await window.go.main.App.SearchFiles(root, needle);
             } catch (err) {
-                busy.dismiss();
+                if (this.searchResults) this.searchResults.running = false;
+                this.updateSearchHead();
                 await this.say('Search failed', String(err));
                 return;
             }
-            busy.dismiss();
 
-            this.searchResults = result;
-            this.renderSearchResults(result);
+            // The events carry the same hits, so this is a reconciliation
+            // rather than a second render: whatever the run ended up with wins.
+            this.searchResults = Object.assign({ running: false }, result);
+            this.renderSearchResults(this.searchResults);
 
             if (!result.hits.length) {
                 window.UX.toast.warn('Nothing under ' + root + ' matches "' + needle + '"');
@@ -830,6 +844,74 @@ function initApp() {
             } else {
                 window.UX.toast.ok(result.hits.length + ' found in ' + result.folders + ' folder(s)');
             }
+        },
+
+        /**
+         * Adds hits to the list as the walk turns them up.
+         *
+         * Rows are appended rather than the list being redrawn: a redraw on
+         * every batch would throw away the scroll position of someone already
+         * reading the results.
+         */
+        onSearchProgress(update) {
+            const state = this.searchResults;
+            if (!state || !state.running || !update) return;
+
+            // A run this window is no longer waiting for.
+            if (state.id !== undefined && update.id !== undefined && update.id !== state.id) return;
+            if (state.id === undefined && update.id !== undefined) state.id = update.id;
+
+            state.folders = update.folders || state.folders;
+            state.scanned = update.scanned || state.scanned;
+
+            const tree = document.getElementById('fileTree');
+            (update.hits || []).forEach((hit) => {
+                state.hits.push(hit);
+                if (tree) tree.appendChild(this.searchRow(hit));
+            });
+
+            if (update.done) state.running = false;
+            this.updateSearchHead();
+        },
+
+        /** One result row, shared by the live path and the final render. */
+        searchRow(hit) {
+            const row = this.createFileItem({
+                name: hit.name,
+                isDir: hit.is_dir,
+                size: hit.size,
+                path: hit.path
+            });
+            // The folder it was found in is the whole point of a search result,
+            // so it replaces the size column's neighbours.
+            const where = document.createElement('span');
+            where.className = 'search-where mono';
+            where.textContent = hit.dir;
+            where.title = hit.path;
+            row.insertBefore(where, row.querySelector('.file-size'));
+            return row;
+        },
+
+        /** Keeps the counter above the list honest while the walk runs. */
+        updateSearchHead() {
+            const state = this.searchResults;
+            const head = document.getElementById('searchCount');
+            if (!state || !head) return;
+            const n = state.hits.length;
+            head.textContent = n + ' match' + (n === 1 ? '' : 'es') +
+                (state.running ? ' so far · ' + (state.folders || 0) + ' folder(s) searched' : '');
+
+            const spin = document.getElementById('searchSpin');
+            if (spin) spin.hidden = !state.running;
+
+            const warn = document.getElementById('searchWarn');
+            if (warn) {
+                warn.hidden = !state.truncated;
+                warn.textContent = state.reason || '';
+            }
+
+            const none = document.getElementById('searchNone');
+            if (none) none.hidden = state.running || n > 0;
         },
 
         /** Draws search hits in place of the folder listing. */
@@ -844,40 +926,36 @@ function initApp() {
             const head = document.createElement('div');
             head.className = 'search-head';
             head.innerHTML =
-                '<span>' + result.hits.length + ' match' + (result.hits.length === 1 ? '' : 'es') +
-                ' under <span class="mono">' + this.escapeHtml(result.root) + '</span></span>' +
-                (result.truncated ? '<span class="search-warn">' + this.escapeHtml(result.reason) + '</span>' : '') +
+                '<span id="searchSpin" class="search-spin"' + (result.running ? '' : ' hidden') + '>' +
+                (window.Icons ? window.Icons.svg('refresh', 'spin ic-14') : '') + '</span>' +
+                '<span id="searchCount"></span>' +
+                '<span>under <span class="mono">' + this.escapeHtml(result.root) + '</span></span>' +
+                '<span class="search-warn" id="searchWarn" hidden></span>' +
                 '<button class="sm" id="searchBackBtn" type="button">Back to the folder</button>';
             tree.appendChild(head);
 
-            result.hits.forEach((hit) => {
-                const entry = {
-                    name: hit.name,
-                    isDir: hit.is_dir,
-                    size: hit.size,
-                    path: hit.path
-                };
-                const row = this.createFileItem(entry);
-                // The folder it was found in is the whole point of a search
-                // result, so it replaces the size column's neighbours.
-                const where = document.createElement('span');
-                where.className = 'search-where mono';
-                where.textContent = hit.dir;
-                where.title = hit.path;
-                row.insertBefore(where, row.querySelector('.file-size'));
-                tree.appendChild(row);
-            });
+            result.hits.forEach((hit) => tree.appendChild(this.searchRow(hit)));
 
-            if (!result.hits.length) {
-                const none = document.createElement('div');
-                none.className = 'preview-empty';
-                none.textContent = 'Nothing matched';
-                tree.appendChild(none);
-            }
+            // Kept in the DOM rather than added later, so a walk that ends with
+            // nothing does not have to redraw to say so.
+            const none = document.createElement('div');
+            none.id = 'searchNone';
+            none.className = 'preview-empty';
+            none.textContent = 'Nothing matched';
+            none.hidden = true;
+            tree.appendChild(none);
+
+            this.updateSearchHead();
 
             const back = document.getElementById('searchBackBtn');
             if (back) {
                 back.addEventListener('click', () => {
+                    // Leaving the results stops the walk: eight workers listing
+                    // folders for a list nobody is looking at is just load on
+                    // somebody's panel.
+                    if (this.searchResults && this.searchResults.running) {
+                        window.go.main.App.CancelSearch();
+                    }
                     this.searchResults = null;
                     const box = document.getElementById('fileFilter');
                     if (box) box.value = '';

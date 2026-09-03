@@ -20,6 +20,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -32,6 +33,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -2753,6 +2756,9 @@ type SearchHit struct {
 
 // SearchOutcome is what a walk found, and what it had to leave out.
 type SearchOutcome struct {
+	// ID identifies this run, so the window can ignore events from a search
+	// it has already replaced.
+	ID        uint64      `json:"id"`
 	Query     string      `json:"query"`
 	Root      string      `json:"root"`
 	Hits      []SearchHit `json:"hits"`
@@ -2765,11 +2771,26 @@ type SearchOutcome struct {
 // Bounds for a recursive search. Each folder is one API round trip, so a deep
 // tree is a lot of them; these keep a stray search from becoming a thousand
 // requests to somebody's panel.
+//
+// The ceilings are higher than they were because the walk now runs several
+// folders at a time rather than one after another — the old numbers were
+// sized for a serial walk that spent nearly all its time waiting.
 const (
-	searchMaxFolders = 600
-	searchMaxHits    = 400
-	searchMaxDepth   = 12
-	searchDeadline   = 20 * time.Second
+	searchMaxFolders = 2500
+	searchMaxHits    = 1000
+	searchMaxDepth   = 14
+	searchDeadline   = 25 * time.Second
+
+	// How many listings are in flight at once. Eight is enough to hide the
+	// round trip without turning a search into something a panel would rate
+	// limit.
+	searchWorkers = 8
+
+	// Hits go to the window in batches. One event per hit is a lot of bridge
+	// traffic for a folder full of matches, and one event at the end is what
+	// this was trying to stop being.
+	searchFlushEvery = 120 * time.Millisecond
+	searchFlushAt    = 24
 )
 
 // SearchFiles walks the tree under root looking for names containing query.
@@ -2799,74 +2820,228 @@ func (a *App) SearchFiles(root, query string) (*SearchOutcome, error) {
 	}
 	defer c.Close()
 
-	out := &SearchOutcome{Query: query, Root: cleanRoot, Hits: []SearchHit{}}
+	runID := atomic.AddUint64(&a.searchRun, 1)
+
+	// Anything still running is now stale, and its events would land in a
+	// window that has moved on.
+	a.searchMu.Lock()
+	if a.searchCancel != nil {
+		a.searchCancel()
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), searchDeadline)
+	a.searchCancel = cancel
+	a.searchMu.Unlock()
+	defer cancel()
+
+	out := &SearchOutcome{Query: query, Root: cleanRoot, Hits: []SearchHit{}, ID: runID}
 	started := time.Now()
 
-	err = func() error {
-		type todo struct {
-			path  string
-			depth int
-		}
-		queue := []todo{{path: cleanRoot, depth: 0}}
+	walk := newSearchWalk(a, runID, needle, out)
+	walk.push(cleanRoot, 0)
 
-		for len(queue) > 0 {
-			if out.Folders >= searchMaxFolders {
-				out.Truncated = true
-				out.Reason = fmt.Sprintf("stopped after %d folders", searchMaxFolders)
-				break
-			}
-			if len(out.Hits) >= searchMaxHits {
-				out.Truncated = true
-				out.Reason = fmt.Sprintf("stopped at %d matches", searchMaxHits)
-				break
-			}
-			if time.Since(started) > searchDeadline {
-				out.Truncated = true
-				out.Reason = "stopped after " + searchDeadline.String()
-				break
-			}
-
-			current := queue[0]
-			queue = queue[1:]
-
-			files, listErr := c.ListFiles(current.path)
-			if listErr != nil {
-				// A folder that cannot be read is skipped rather than failing
-				// the whole search; permissions vary inside a container.
-				continue
-			}
-			out.Folders++
-
-			for i := range files {
-				f := files[i]
-				out.Scanned++
-
-				full := joinRemote(current.path, f.Name)
-				isDir := !f.IsFile && !f.IsSymlink
-
-				if strings.Contains(strings.ToLower(f.Name), needle) && len(out.Hits) < searchMaxHits {
-					out.Hits = append(out.Hits, SearchHit{
-						Path:  full,
-						Name:  f.Name,
-						Dir:   current.path,
-						Size:  f.Size,
-						IsDir: isDir,
-					})
-				}
-
-				// Symlinks are not followed: a link pointing up the tree turns
-				// the walk into a loop.
-				if isDir && current.depth < searchMaxDepth {
-					queue = append(queue, todo{path: full, depth: current.depth + 1})
-				}
-			}
-		}
-		return nil
-	}()
-	if err != nil {
-		return nil, err
+	var wg sync.WaitGroup
+	for i := 0; i < searchWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			walk.run(ctx, c)
+		}()
 	}
+	wg.Wait()
+
+	walk.finish(ctx, started)
 	return out, nil
+}
+
+// CancelSearch stops the walk in progress, so closing the results or typing a
+// new query does not leave eight goroutines listing folders nobody is waiting
+// for.
+func (a *App) CancelSearch() {
+	a.searchMu.Lock()
+	if a.searchCancel != nil {
+		a.searchCancel()
+		a.searchCancel = nil
+	}
+	a.searchMu.Unlock()
+}
+
+// searchWalk is the shared state of one search: the queue every worker pulls
+// from, the counters they share, and the batch waiting to go to the window.
+//
+// Breadth-first is kept — the thing being looked for is usually near the top,
+// so hitting the folder ceiling means the shallow half was covered rather than
+// one deep branch.
+type searchWalk struct {
+	app    *App
+	runID  uint64
+	needle string
+
+	mu      sync.Mutex
+	queue   []searchTodo
+	waiting int
+	out     *SearchOutcome
+	done    bool
+
+	pending   []SearchHit
+	lastFlush time.Time
+}
+
+type searchTodo struct {
+	path  string
+	depth int
+}
+
+func newSearchWalk(a *App, runID uint64, needle string, out *SearchOutcome) *searchWalk {
+	return &searchWalk{app: a, runID: runID, needle: needle, out: out, lastFlush: time.Now()}
+}
+
+func (w *searchWalk) push(path string, depth int) {
+	w.mu.Lock()
+	w.queue = append(w.queue, searchTodo{path: path, depth: depth})
+	w.mu.Unlock()
+}
+
+// next hands out one folder, or reports that the walk is over.
+//
+// A worker that finds the queue empty while others are still listing has to
+// wait rather than exit: those listings will add more folders. The walk ends
+// when the queue is empty and nobody is working.
+func (w *searchWalk) next(ctx context.Context) (searchTodo, bool) {
+	for {
+		w.mu.Lock()
+		if w.done || ctx.Err() != nil {
+			w.mu.Unlock()
+			return searchTodo{}, false
+		}
+		if len(w.queue) > 0 {
+			item := w.queue[0]
+			w.queue = w.queue[1:]
+			w.waiting++
+			w.mu.Unlock()
+			return item, true
+		}
+		if w.waiting == 0 {
+			w.done = true
+			w.mu.Unlock()
+			return searchTodo{}, false
+		}
+		w.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return searchTodo{}, false
+		case <-time.After(8 * time.Millisecond):
+		}
+	}
+}
+
+func (w *searchWalk) run(ctx context.Context, c *pterodactyl.Client) {
+	for {
+		item, ok := w.next(ctx)
+		if !ok {
+			return
+		}
+
+		files, listErr := c.ListFiles(item.path)
+
+		w.mu.Lock()
+		w.waiting--
+		if listErr != nil {
+			// A folder that cannot be read is skipped rather than failing the
+			// whole search; permissions vary inside a container.
+			w.mu.Unlock()
+			continue
+		}
+
+		w.out.Folders++
+		if w.out.Folders >= searchMaxFolders {
+			w.stopLocked(fmt.Sprintf("stopped after %d folders", searchMaxFolders))
+		}
+
+		for i := range files {
+			f := files[i]
+			w.out.Scanned++
+
+			full := joinRemote(item.path, f.Name)
+			isDir := !f.IsFile && !f.IsSymlink
+
+			if strings.Contains(strings.ToLower(f.Name), w.needle) {
+				if len(w.out.Hits) >= searchMaxHits {
+					w.stopLocked(fmt.Sprintf("stopped at %d matches", searchMaxHits))
+				} else {
+					hit := SearchHit{Path: full, Name: f.Name, Dir: item.path, Size: f.Size, IsDir: isDir}
+					w.out.Hits = append(w.out.Hits, hit)
+					w.pending = append(w.pending, hit)
+				}
+			}
+
+			// Symlinks are not followed: a link pointing up the tree turns the
+			// walk into a loop.
+			if isDir && item.depth < searchMaxDepth && !w.done {
+				w.queue = append(w.queue, searchTodo{path: full, depth: item.depth + 1})
+			}
+		}
+
+		flush := len(w.pending) >= searchFlushAt || time.Since(w.lastFlush) >= searchFlushEvery
+		var batch []SearchHit
+		if flush && len(w.pending) > 0 {
+			batch = w.pending
+			w.pending = nil
+			w.lastFlush = time.Now()
+		}
+		folders, scanned, stopped := w.out.Folders, w.out.Scanned, w.done
+		w.mu.Unlock()
+
+		if batch != nil {
+			w.emit(ctx, batch, folders, scanned, false)
+		}
+		if stopped {
+			return
+		}
+	}
+}
+
+// stopLocked ends the walk. The caller holds the lock.
+func (w *searchWalk) stopLocked(reason string) {
+	if w.done {
+		return
+	}
+	w.done = true
+	w.out.Truncated = true
+	w.out.Reason = reason
+}
+
+func (w *searchWalk) finish(ctx context.Context, started time.Time) {
+	w.mu.Lock()
+	if ctx.Err() == context.DeadlineExceeded && !w.out.Truncated {
+		w.out.Truncated = true
+		w.out.Reason = "stopped after " + searchDeadline.String()
+	}
+	batch := w.pending
+	w.pending = nil
+	folders, scanned := w.out.Folders, w.out.Scanned
+	w.mu.Unlock()
+
+	w.emit(ctx, batch, folders, scanned, true)
+	_ = started
+}
+
+// emit sends one batch to the window. The run id lets a window that has since
+// started another search throw away what it is no longer waiting for.
+func (w *searchWalk) emit(ctx context.Context, hits []SearchHit, folders, scanned int, final bool) {
+	if w.app.ctx == nil {
+		return
+	}
+	if hits == nil {
+		hits = []SearchHit{}
+	}
+	runtime.EventsEmit(w.app.ctx, "search-progress", map[string]interface{}{
+		"id":      w.runID,
+		"hits":    hits,
+		"folders": folders,
+		"scanned": scanned,
+		"done":    final,
+	})
 }
 
 /* -------------------------------------------------------------- uploads */
