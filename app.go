@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"pteroclient-wails/pkg/config"
@@ -38,6 +39,11 @@ type App struct {
 	clients   map[string]*cachedClient
 	clientGen int
 
+	// Archives made so a folder could be dragged out of the window. They are
+	// real files on somebody's server, so they are tracked and swept.
+	dragMu       sync.Mutex
+	dragArchives []dragArchive
+
 	// Set when this process was launched as a console window rather than the
 	// main app. See main.go and OpenConsoleWindow.
 	consoleOnly      bool
@@ -58,6 +64,25 @@ func NewApp() *App {
 }
 
 // startup is called when the app starts
+// shutdown runs as the window closes. Anything this app made on somebody's
+// server and has not cleaned up yet gets cleaned up here.
+//
+// Bounded: this blocks the window from closing, and a panel that has stopped
+// answering must not mean an app that will not quit. Whatever is left behind
+// is swept on the next run instead.
+func (a *App) shutdown(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.sweepDragArchives(true)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+	}
+}
+
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.serverPanelMap = make(map[string]string)

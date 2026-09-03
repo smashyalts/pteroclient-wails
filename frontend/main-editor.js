@@ -848,23 +848,17 @@ function initApp() {
             div.appendChild(date);
             div.appendChild(mode);
             
-            if (!isParent && !file.isDir) {
+            if (!isParent) {
                 div.setAttribute('draggable', 'true');
-                // The signed URL has to be on the dataTransfer synchronously,
-                // but the panel issues it over the network — so it is fetched
-                // on hover as well as on selection, which covers dragging a row
-                // without clicking it first.
-                div.addEventListener('mouseenter', () => this.prefetchDownloadURL(entry));
-                div.addEventListener('dragstart', (e) => {
-                    const url = this.downloadURLs && this.downloadURLs.get(fullPath);
-                    if (url) {
-                        // Chromium's contract for a drag the OS shell accepts.
-                        e.dataTransfer.setData('DownloadURL',
-                            'application/octet-stream:' + file.name + ':' + url);
-                    }
-                    e.dataTransfer.setData('text/plain', fullPath);
-                    e.dataTransfer.effectAllowed = 'copy';
-                });
+                if (!file.isDir) {
+                    // The signed URL has to be on the dataTransfer
+                    // synchronously, but the panel issues it over the network —
+                    // so it is fetched on hover as well as on selection, which
+                    // covers dragging a row without clicking it first.
+                    div.addEventListener('mouseenter', () => this.prefetchDownloadURL(entry));
+                }
+                div.addEventListener('dragstart', (e) => this.startDragOut(e, entry, file));
+                div.addEventListener('dragend', (e) => this.endDragOut(e));
             }
 
             // Press feedback. Clicking a row used to do nothing visible until
@@ -2073,6 +2067,96 @@ function initApp() {
          * and the drag uses it if it arrived. If it did not, the drag simply
          * does not leave the window; use Download instead.
          */
+        /**
+         * Drag a selection out of the window and onto the desktop.
+         *
+         * A single file has a URL of its own and goes on the drag straight
+         * away. A folder does not — one has to be archived on the panel first,
+         * and that is a network round trip. Since the URL has to be on the
+         * event synchronously, the first drag of a folder starts the packing
+         * and says so, and the drag after it carries the archive.
+         */
+        startDragOut(e, entry, file) {
+            // Dragging a row that is part of the selection takes the whole
+            // selection; dragging one outside it takes only that row.
+            let paths = [entry.path];
+            if (this.selection && this.selection.size > 1 && this.selection.has(entry.path)) {
+                paths = Array.from(this.selection.keys());
+            }
+
+            e.dataTransfer.setData('text/plain', paths.join('\n'));
+            e.dataTransfer.effectAllowed = 'copy';
+
+            // One plain file needs nothing made for it.
+            if (paths.length === 1 && !file.isDir) {
+                const url = this.downloadURLs && this.downloadURLs.get(entry.path);
+                if (url) {
+                    // Chromium's contract for a drag the OS shell accepts.
+                    e.dataTransfer.setData('DownloadURL',
+                        'application/octet-stream:' + file.name + ':' + url);
+                }
+                return;
+            }
+
+            const key = paths.slice().sort().join('\u0000');
+            const ready = this.dragArchives && this.dragArchives.get(key);
+            if (ready) {
+                e.dataTransfer.setData('DownloadURL',
+                    'application/octet-stream:' + ready.name + ':' + ready.url);
+                this.dragInFlight = ready;
+                return;
+            }
+
+            // Nothing to carry yet. Start packing and let this drag fizzle.
+            this.prepareDragArchive(key, paths);
+        },
+
+        async prepareDragArchive(key, paths) {
+            if (!this.dragArchives) this.dragArchives = new Map();
+            if (this.dragPending === key) return;
+            this.dragPending = key;
+
+            const busy = window.UX.toast.show(
+                'Packing ' + paths.length + ' item(s) for the drag — try again when this clears',
+                { duration: 600000 });
+
+            try {
+                const made = await window.go.main.App.PrepareDragArchive(paths);
+                busy.dismiss();
+                this.dragArchives.set(key, made);
+                // The signed URL is short lived and the archive is swept off
+                // the panel after ten minutes, so this forgets well before
+                // either of those runs out.
+                setTimeout(() => {
+                    if (this.dragArchives.get(key) === made) this.dragArchives.delete(key);
+                }, 5 * 60 * 1000);
+                window.UX.toast.ok(made.archived
+                    ? 'Packed — drag it out now. The temporary archive comes off the server afterwards.'
+                    : 'Ready — drag it out now');
+            } catch (err) {
+                busy.dismiss();
+                window.UX.toast.bad('Could not pack that: ' + String(err));
+            } finally {
+                if (this.dragPending === key) this.dragPending = null;
+            }
+        },
+
+        endDragOut(e) {
+            const used = this.dragInFlight;
+            this.dragInFlight = null;
+
+            // A drag the shell refused leaves an archive with nothing to do, so
+            // it comes off the panel now rather than waiting out its lifetime.
+            if (used && used.archived && e.dataTransfer.dropEffect === 'none') {
+                if (this.dragArchives) {
+                    this.dragArchives.forEach((value, key) => {
+                        if (value === used) this.dragArchives.delete(key);
+                    });
+                }
+                window.go.main.App.DiscardDragArchive(used.path).catch(() => {});
+            }
+        },
+
         prefetchDownloadURL(entry) {
             if (!entry || entry.isDir || !entry.path) return;
             if (this.downloadURLs && this.downloadURLs.has(entry.path)) return;

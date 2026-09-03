@@ -1524,6 +1524,255 @@ func (a *App) GetFileDownloadURL(remotePath string) (string, error) {
 	return url, err
 }
 
+/* ---------------------------------------- dragging a folder to the desktop */
+
+// The shell only accepts a drag when the drag event carries a download URL, and
+// that has to be on the event synchronously. A file has one; a folder does not,
+// and making one means archiving it on the panel first — which is a network
+// round trip and, for a world folder, not a quick one.
+//
+// So the first drag of a folder prepares the archive and says so, and the drag
+// after it carries the URL. The archive is a real file on somebody's server, so
+// every one made here is tracked and swept rather than left lying about.
+const (
+	dragArchiveTTL = 10 * time.Minute
+	// A ceiling on how many can be outstanding at once, so a user who drags
+	// repeatedly cannot fill their own disk. The oldest is swept early.
+	dragArchiveMax = 6
+)
+
+// dragArchive is one archive this app made for a drag, and where to find it.
+type dragArchive struct {
+	serverID string
+	path     string
+	created  time.Time
+}
+
+// DragArchive is what a drag needs: a name for the file that lands on the
+// desktop, and a URL the shell can fetch it from.
+type DragArchive struct {
+	URL      string `json:"url"`
+	Name     string `json:"name"`
+	Path     string `json:"path"`
+	Bytes    int64  `json:"bytes"`
+	Archived bool   `json:"archived"`
+}
+
+// PrepareDragArchive makes one downloadable thing out of a selection so it can
+// be dragged out of the window. A single file needs no archive and is handed
+// back as itself; anything else is archived on the panel.
+func (a *App) PrepareDragArchive(paths []string) (*DragArchive, error) {
+	if len(paths) == 0 {
+		return nil, errors.New("nothing selected")
+	}
+
+	// Clear out anything left from earlier drags before adding to the pile.
+	a.sweepDragArchives(false)
+
+	cleaned := make([]string, 0, len(paths))
+	seen := map[string]bool{}
+	for _, raw := range paths {
+		norm, err := normalizeRemotePath(raw)
+		if err != nil {
+			return nil, err
+		}
+		if _, _, err := splitRemote(norm); err != nil {
+			return nil, err
+		}
+		if !seen[norm] {
+			seen[norm] = true
+			cleaned = append(cleaned, norm)
+		}
+	}
+	sort.Strings(cleaned)
+	cleaned = collapseNested(cleaned)
+
+	out := &DragArchive{}
+	var madePath string
+	var madeServer string
+
+	a.fileMu.Lock()
+	err := a.withServerClient("", func(c *pterodactyl.Client, _ string) error {
+		root, _, err := splitRemote(cleaned[0])
+		if err != nil {
+			return err
+		}
+
+		listing, listErr := c.ListFiles(root)
+		if listErr != nil {
+			return fmt.Errorf("cannot list %s: %w", root, listErr)
+		}
+		present := map[string]*pterodactyl.FileInfo{}
+		for i := range listing {
+			present[listing[i].Name] = &listing[i]
+		}
+
+		names := make([]string, 0, len(cleaned))
+		onlyFile := true
+		for _, item := range cleaned {
+			dir, name, splitErr := splitRemote(item)
+			if splitErr != nil {
+				return splitErr
+			}
+			if dir != root {
+				return fmt.Errorf("everything dragged together has to be in one folder; %s is not in %s", item, root)
+			}
+			found := present[name]
+			if found == nil {
+				return fmt.Errorf("%s no longer exists — refresh the file list", item)
+			}
+			if !found.IsFile || found.IsSymlink {
+				onlyFile = false
+			}
+			names = append(names, name)
+		}
+
+		// One plain file drags as itself. Nothing is created, so nothing has
+		// to be cleaned up afterwards.
+		if len(cleaned) == 1 && onlyFile {
+			url, urlErr := c.GetDownloadURL(cleaned[0])
+			if urlErr != nil {
+				return urlErr
+			}
+			out.URL = url
+			out.Name = names[0]
+			out.Path = cleaned[0]
+			out.Bytes = present[names[0]].Size
+			return nil
+		}
+
+		attrs, compressErr := c.CompressFiles(root, names)
+		if compressErr != nil {
+			return fmt.Errorf("could not archive the selection: %w", compressErr)
+		}
+		archive, _ := attrs["name"].(string)
+		if archive == "" {
+			return errors.New("the panel did not say what it named the archive")
+		}
+		full := joinRemote(root, archive)
+
+		url, urlErr := c.GetDownloadURL(full)
+		if urlErr != nil {
+			// The archive exists whether or not a URL came back, so it still
+			// has to be swept.
+			if _, existed := present[archive]; !existed {
+				madePath, madeServer = full, c.GetServerID()
+			}
+			return urlErr
+		}
+
+		out.URL = url
+		out.Name = archive
+		out.Path = full
+		out.Archived = true
+		if size, ok := attrs["size"].(float64); ok {
+			out.Bytes = int64(size)
+		}
+
+		// Only ours to delete if the name was not already taken. An archive
+		// that was there beforehand belongs to whoever put it there.
+		if _, existed := present[archive]; !existed {
+			madePath, madeServer = full, c.GetServerID()
+		}
+		return nil
+	})
+	a.fileMu.Unlock()
+
+	if madePath != "" {
+		a.trackDragArchive(madeServer, madePath)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// trackDragArchive records an archive so it gets swept, and sweeps the oldest
+// early if too many are outstanding.
+func (a *App) trackDragArchive(serverID, path string) {
+	a.dragMu.Lock()
+	a.dragArchives = append(a.dragArchives, dragArchive{
+		serverID: serverID,
+		path:     path,
+		created:  time.Now(),
+	})
+	over := len(a.dragArchives) - dragArchiveMax
+	var early []dragArchive
+	if over > 0 {
+		early = append(early, a.dragArchives[:over]...)
+		a.dragArchives = a.dragArchives[over:]
+	}
+	a.dragMu.Unlock()
+
+	for _, old := range early {
+		a.removeDragArchive(old)
+	}
+}
+
+// DiscardDragArchive removes an archive made for a drag that did not happen.
+// The frontend calls this when the drag is cancelled, so nothing waits out the
+// full lifetime on somebody's disk for no reason.
+func (a *App) DiscardDragArchive(path string) error {
+	norm, err := normalizeRemotePath(path)
+	if err != nil {
+		return err
+	}
+
+	a.dragMu.Lock()
+	var target *dragArchive
+	kept := a.dragArchives[:0]
+	for _, item := range a.dragArchives {
+		if target == nil && item.path == norm {
+			copied := item
+			target = &copied
+			continue
+		}
+		kept = append(kept, item)
+	}
+	a.dragArchives = kept
+	a.dragMu.Unlock()
+
+	if target == nil {
+		// Not one of ours. Deleting it would be deleting somebody's file.
+		return nil
+	}
+	return a.removeDragArchive(*target)
+}
+
+// sweepDragArchives deletes the archives that have outlived their drag. force
+// takes every one of them, for shutdown.
+func (a *App) sweepDragArchives(force bool) {
+	a.dragMu.Lock()
+	var due []dragArchive
+	kept := a.dragArchives[:0]
+	for _, item := range a.dragArchives {
+		if force || time.Since(item.created) > dragArchiveTTL {
+			due = append(due, item)
+			continue
+		}
+		kept = append(kept, item)
+	}
+	a.dragArchives = kept
+	a.dragMu.Unlock()
+
+	for _, item := range due {
+		_ = a.removeDragArchive(item)
+	}
+}
+
+// removeDragArchive deletes one archive off the panel it was made on.
+func (a *App) removeDragArchive(item dragArchive) error {
+	dir, name, err := splitRemote(item.path)
+	if err != nil {
+		return err
+	}
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+	return a.withServerClient(item.serverID, func(c *pterodactyl.Client, _ string) error {
+		return c.DeleteFiles(dir, []string{name})
+	})
+}
+
 /* ------------------------------------------------------------ archives */
 
 // ArchiveResult describes the archive a compress produced.
