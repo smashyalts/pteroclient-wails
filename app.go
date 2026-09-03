@@ -44,6 +44,10 @@ type App struct {
 	dragMu       sync.Mutex
 	dragArchives []dragArchive
 
+	// Guards consoleWS: the read loop clears it from its own goroutine while
+	// a binding call may be reading it.
+	consoleMu sync.Mutex
+
 	// Set when this process was launched as a console window rather than the
 	// main app. See main.go and OpenConsoleWindow.
 	consoleOnly      bool
@@ -737,6 +741,36 @@ func (a *App) ConnectConsole() error {
 		runtime.EventsEmit(a.ctx, "console-error", err.Error())
 	}
 
+	// The token the panel issues lasts about ten minutes. It warns a minute
+	// before the end, and this hands back a fresh one so the socket is
+	// re-authenticated in place rather than dropped.
+	a.consoleWS.RefreshToken = func() (string, error) {
+		if a.client == nil {
+			return "", fmt.Errorf("not connected")
+		}
+		fresh, credErr := a.client.GetWebSocketCredentials()
+		if credErr != nil {
+			return "", credErr
+		}
+		return fresh.Token, nil
+	}
+
+	// However the socket ends, the UI hears about it. Without this the button
+	// went on saying Disconnect over a console that had already expired.
+	socket := a.consoleWS
+	a.consoleWS.OnClose = func() {
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "console-connected", false)
+		}
+		// Only for the socket this closure belongs to: a later connection has
+		// its own, and must not be reported as dead by an older one.
+		a.consoleMu.Lock()
+		if a.consoleWS == socket {
+			a.consoleWS = nil
+		}
+		a.consoleMu.Unlock()
+	}
+
 	// Connect
 	err = a.consoleWS.Connect()
 	if err != nil {
@@ -754,10 +788,29 @@ func (a *App) ConnectConsole() error {
 
 // DisconnectConsole disconnects console
 func (a *App) DisconnectConsole() error {
-	if a.consoleWS != nil {
-		return a.consoleWS.Close()
+	a.consoleMu.Lock()
+	socket := a.consoleWS
+	a.consoleWS = nil
+	a.consoleMu.Unlock()
+
+	if socket != nil {
+		return socket.Close()
+	}
+	// Nothing open, but the UI may still think there is — say so plainly
+	// rather than leaving it showing a button that does nothing.
+	if a.ctx != nil {
+		runtime.EventsEmit(a.ctx, "console-connected", false)
 	}
 	return nil
+}
+
+// ConsoleConnected reports whether the console socket is actually live, for a
+// UI that wants to check rather than remember.
+func (a *App) ConsoleConnected() bool {
+	a.consoleMu.Lock()
+	socket := a.consoleWS
+	a.consoleMu.Unlock()
+	return socket != nil && socket.IsConnected()
 }
 
 // ListFiles lists files in a directory

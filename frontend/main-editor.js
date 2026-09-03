@@ -169,6 +169,12 @@ function initApp() {
         openFiles: new Map(), // path -> {content, modified, originalContent}
         activeFile: null,
         autoSave: false,
+
+        // Console reconnect state. consoleWanted is what was asked for, as
+        // opposed to consoleConnected, which is what is actually true.
+        consoleWanted: false,
+        consoleRetries: 0,
+        consoleRetryTimer: null,
         
         async init() {
             console.log('App init started');
@@ -358,9 +364,18 @@ function initApp() {
             window.runtime.EventsOn('console-connected', (connected) => {
                 console.log('Console connected:', connected);
                 this.consoleConnected = connected;
-                const btn = document.getElementById('connectBtn');
-                if (btn) {
-                    btn.textContent = connected ? 'Disconnect' : 'Connect';
+                this.paintConnectButton();
+
+                if (connected) {
+                    // A connection that came up cancels whatever retry was
+                    // pending and resets the count, so the next drop gets a
+                    // full set of attempts rather than the tail of this one.
+                    this.consoleRetries = 0;
+                    this.cancelConsoleRetry();
+                } else if (this.consoleWanted) {
+                    // Dropped while the console was meant to be up - usually an
+                    // expired token, sometimes the network. Get it back.
+                    this.scheduleConsoleReconnect();
                 }
                 if (connected) {
                     this.appendConsole('=== Console connected ===', 'info');
@@ -2672,18 +2687,93 @@ function initApp() {
 
         async connectConsole() {
             try {
-                if (this.consoleConnected) {
+                if (this.consoleConnected || this.consoleRetryTimer) {
+                    // Pressing Disconnect also calls off a reconnect in
+                    // progress. Being reconnected to something you just asked
+                    // to leave is not what the button says.
+                    this.consoleWanted = false;
+                    this.cancelConsoleRetry();
                     await window.go.main.App.DisconnectConsole();
                     this.consoleConnected = false;
-                    document.getElementById('connectBtn').textContent = 'Connect';
+                    this.paintConnectButton();
                 } else {
                     console.log('Connecting to console...');
+                    this.consoleWanted = true;
+                    this.consoleRetries = 0;
                     await window.go.main.App.ConnectConsole();
                 }
             } catch (err) {
                 console.error('Console connection failed:', err);
                 window.UX.toast.bad('Console: ' + err);
+                // A failed connect emits no event, so without this the button
+                // would sit on Connect having been asked to connect, and a
+                // later stray disconnect would start retrying out of nowhere.
+                if (this.consoleWanted) this.scheduleConsoleReconnect();
+                else this.paintConnectButton();
             }
+        },
+
+        /**
+         * The console's token lasts about ten minutes, and a dropped socket
+         * used to mean typing Connect again - after noticing, since the button
+         * still said Disconnect.
+         *
+         * The Go side renews an expiring token in place, so this is the
+         * backstop for what cannot be renewed: a token that ran out while the
+         * machine was asleep, a panel briefly unreachable, a network that came
+         * and went.
+         */
+        CONSOLE_RETRY_DELAYS: [1000, 3000, 8000, 20000],
+
+        scheduleConsoleReconnect() {
+            if (this.consoleRetryTimer || !this.consoleWanted) return;
+
+            const attempt = this.consoleRetries || 0;
+            if (attempt >= this.CONSOLE_RETRY_DELAYS.length) {
+                this.appendConsole(
+                    '=== Could not reconnect. Press Connect to try again ===', 'error');
+                this.consoleWanted = false;
+                this.paintConnectButton();
+                return;
+            }
+
+            const wait = this.CONSOLE_RETRY_DELAYS[attempt];
+            this.consoleRetries = attempt + 1;
+            this.consoleRetryTimer = setTimeout(async () => {
+                this.consoleRetryTimer = null;
+                if (!this.consoleWanted || this.consoleConnected) return;
+                this.paintConnectButton();
+                try {
+                    await window.go.main.App.ConnectConsole();
+                } catch (err) {
+                    this.appendConsole('[ERROR] Reconnect failed: ' + err, 'error');
+                    // A failed connect emits no console-connected event, so the
+                    // next attempt is booked here rather than waited for.
+                    this.scheduleConsoleReconnect();
+                }
+            }, wait);
+
+            this.paintConnectButton();
+            this.appendConsole(
+                '=== Reconnecting in ' + Math.round(wait / 1000) + 's ' +
+                '(attempt ' + this.consoleRetries + ' of ' + this.CONSOLE_RETRY_DELAYS.length + ') ===',
+                'warn');
+        },
+
+        cancelConsoleRetry() {
+            if (!this.consoleRetryTimer) return;
+            clearTimeout(this.consoleRetryTimer);
+            this.consoleRetryTimer = null;
+        },
+
+        // One place decides what the button says, so a reconnect in progress
+        // cannot leave it claiming to be connected.
+        paintConnectButton() {
+            const btn = document.getElementById('connectBtn');
+            if (!btn) return;
+            if (this.consoleConnected) btn.textContent = 'Disconnect';
+            else if (this.consoleRetryTimer) btn.textContent = 'Reconnecting...';
+            else btn.textContent = 'Connect';
         },
 
         // Connect if not already. connectConsole() toggles, so auto-connecting
@@ -2691,6 +2781,8 @@ function initApp() {
         async ensureConsole() {
             if (this.consoleConnected || this.consoleConnecting) return;
             this.consoleConnecting = true;
+            this.consoleWanted = true;
+            this.consoleRetries = 0;
             try {
                 await window.go.main.App.ConnectConsole();
             } catch (err) {
