@@ -16,7 +16,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -37,13 +36,36 @@ const (
 	DefaultStreams = 6
 	MaxStreams     = 16
 
-	// Per file, inside one stream. The panel's wings is not a storage array,
-	// and this is enough to fill a home connection without hammering it.
-	requestsPerFile = 32
-	chunkSize       = 1 << 17 // 128 KB
+	// Requests in flight per file handle. SFTP is request/response, so a
+	// sequential transfer costs one round trip per packet: at 32 KB and 50 ms
+	// that is about 640 KB/s regardless of bandwidth. Sixty-four outstanding
+	// requests is what turns that into line speed.
+	requestsPerFile = 64
+
+	// The SFTP packet size. pkg/sftp refuses anything over 32 KB outright —
+	// MaxPacketChecked returns an error above it, which made NewClient fail
+	// and took every connection attempt with it. Throughput comes from having
+	// many packets in flight, not from larger ones.
+	chunkSize = 32768
 
 	dialTimeout = 20 * time.Second
 )
+
+// preferredCiphers puts AES-GCM first.
+//
+// Go offers ChaCha20-Poly1305 ahead of AES by default, and the server picks the
+// first thing on the client's list that it supports. On anything with AES-NI —
+// every desktop this runs on — AES-GCM is several times faster, and on a fast
+// link the cipher is what the transfer is waiting for. The rest of Go's list
+// follows, so a server without AES still negotiates.
+var preferredCiphers = []string{
+	"aes128-gcm@openssh.com",
+	"aes256-gcm@openssh.com",
+	"chacha20-poly1305@openssh.com",
+	"aes128-ctr",
+	"aes192-ctr",
+	"aes256-ctr",
+}
 
 // Config is everything needed to open a connection.
 type Config struct {
@@ -68,12 +90,22 @@ func (c Config) address() string {
 	return fmt.Sprintf("%s:%d", c.Host, port)
 }
 
-// Session is one SSH connection and the SFTP subsystems opened on it.
-type Session struct {
-	cfg  Config
+// conn is one SSH connection and the SFTP subsystem on it.
+type conn struct {
 	ssh  *ssh.Client
-	pool chan *sftp.Client
-	all  []*sftp.Client
+	sftp *sftp.Client
+}
+
+// Session is a pool of connections.
+//
+// Connections, not channels on one connection: channels share a single TCP
+// stream and therefore a single congestion window, so on a long or lossy path
+// they all wait together. Separate connections are what let a large file be
+// split across several streams.
+type Session struct {
+	cfg   Config
+	conns []*conn
+	pool  chan *conn
 
 	closeOnce sync.Once
 }
@@ -99,12 +131,19 @@ func Dial(cfg Config, hosts *KnownHosts) (*Session, error) {
 		check = hosts.callback(cfg.AcceptFingerprint)
 	}
 
-	client, err := ssh.Dial("tcp", cfg.address(), &ssh.ClientConfig{
+	clientCfg := &ssh.ClientConfig{
 		User:            cfg.User,
 		Auth:            []ssh.AuthMethod{ssh.Password(cfg.Password)},
 		HostKeyCallback: check,
 		Timeout:         dialTimeout,
-	})
+	}
+	clientCfg.Ciphers = preferredCiphers
+
+	s := &Session{cfg: cfg, pool: make(chan *conn, streams)}
+
+	// The first one on its own: its failure is the one worth reporting, and it
+	// is what settles the host key before the rest go out together.
+	first, err := s.open(clientCfg)
 	if err != nil {
 		// The host key errors carry the fingerprint the caller has to show, so
 		// they are handed back as they are rather than wrapped into a string.
@@ -116,36 +155,69 @@ func Dial(cfg Config, hosts *KnownHosts) (*Session, error) {
 		if errors.As(err, &changed) {
 			return nil, changed
 		}
-		return nil, fmt.Errorf("could not connect to %s: %w", cfg.address(), err)
+		return nil, err
 	}
+	s.conns = append(s.conns, first)
+	s.pool <- first
 
-	s := &Session{cfg: cfg, ssh: client, pool: make(chan *sftp.Client, streams)}
-
-	for i := 0; i < streams; i++ {
-		sub, subErr := sftp.NewClient(client,
-			sftp.UseConcurrentWrites(true),
-			sftp.UseConcurrentReads(true),
-			sftp.MaxConcurrentRequestsPerFile(requestsPerFile),
-			sftp.MaxPacketChecked(chunkSize),
-		)
-		if subErr != nil {
-			// One is enough to work with; refusing outright because the sixth
-			// could not be opened would be worse than being slower.
-			if i == 0 {
-				client.Close()
-				return nil, fmt.Errorf("could not start SFTP on %s: %w", cfg.address(), subErr)
+	// The rest in parallel: a handshake is a couple of round trips, and six of
+	// them one after another is a visible wait before anything moves.
+	var wg sync.WaitGroup
+	extra := make([]*conn, streams-1)
+	for i := 1; i < streams; i++ {
+		wg.Add(1)
+		go func(slot int) {
+			defer wg.Done()
+			// The host key is known by now, so this cannot prompt.
+			cfgCopy := *clientCfg
+			if made, openErr := s.open(&cfgCopy); openErr == nil {
+				extra[slot] = made
 			}
-			break
+		}(i - 1)
+	}
+	wg.Wait()
+
+	for _, made := range extra {
+		if made == nil {
+			// One that would not open is not a reason to refuse: fewer
+			// connections is slower, not broken.
+			continue
 		}
-		s.all = append(s.all, sub)
-		s.pool <- sub
+		s.conns = append(s.conns, made)
+		s.pool <- made
 	}
 
 	return s, nil
 }
 
+// open makes one connection and starts SFTP on it.
+func (s *Session) open(clientCfg *ssh.ClientConfig) (*conn, error) {
+	client, err := ssh.Dial("tcp", s.cfg.address(), clientCfg)
+	if err != nil {
+		var unknown *ErrHostKeyUnknown
+		var changed *ErrHostKeyChanged
+		if errors.As(err, &unknown) || errors.As(err, &changed) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("could not connect to %s: %w", s.cfg.address(), err)
+	}
+
+	sub, subErr := sftp.NewClient(client,
+		sftp.UseConcurrentWrites(true),
+		sftp.UseConcurrentReads(true),
+		sftp.UseFstat(true),
+		sftp.MaxConcurrentRequestsPerFile(requestsPerFile),
+		sftp.MaxPacketChecked(chunkSize),
+	)
+	if subErr != nil {
+		client.Close()
+		return nil, fmt.Errorf("could not start SFTP on %s: %w", s.cfg.address(), subErr)
+	}
+	return &conn{ssh: client, sftp: sub}, nil
+}
+
 // Streams is how many transfers can be in flight at once.
-func (s *Session) Streams() int { return len(s.all) }
+func (s *Session) Streams() int { return len(s.conns) }
 
 // Host is what was connected to, for display.
 func (s *Session) Host() string { return s.cfg.address() }
@@ -153,17 +225,15 @@ func (s *Session) Host() string { return s.cfg.address() }
 // User is the account in use, for display.
 func (s *Session) User() string { return s.cfg.User }
 
-// Close shuts every stream and the connection under them.
+// Close shuts every connection.
 func (s *Session) Close() error {
 	var err error
 	s.closeOnce.Do(func() {
-		for _, sub := range s.all {
-			if closeErr := sub.Close(); closeErr != nil && err == nil {
+		for _, c := range s.conns {
+			if closeErr := c.sftp.Close(); closeErr != nil && err == nil {
 				err = closeErr
 			}
-		}
-		if s.ssh != nil {
-			if closeErr := s.ssh.Close(); closeErr != nil && err == nil {
+			if closeErr := c.ssh.Close(); closeErr != nil && err == nil {
 				err = closeErr
 			}
 		}
@@ -171,17 +241,17 @@ func (s *Session) Close() error {
 	return err
 }
 
-// borrow takes a stream, waiting for one if all are busy.
-func (s *Session) borrow(ctx context.Context) (*sftp.Client, error) {
+// borrow takes a connection, waiting for one if all are busy.
+func (s *Session) borrow(ctx context.Context) (*conn, error) {
 	select {
-	case sub := <-s.pool:
-		return sub, nil
+	case c := <-s.pool:
+		return c, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
 }
 
-func (s *Session) give(sub *sftp.Client) { s.pool <- sub }
+func (s *Session) give(c *conn) { s.pool <- c }
 
 /* --------------------------------------------------------------- listing */
 
@@ -201,7 +271,7 @@ func (s *Session) List(ctx context.Context, dir string) ([]Entry, error) {
 	}
 	defer s.give(sub)
 
-	items, err := sub.ReadDir(dir)
+	items, err := sub.sftp.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("cannot list %s: %w", dir, err)
 	}
@@ -246,7 +316,7 @@ func (s *Session) WalkDir(ctx context.Context, dir string, maxEntries int) ([]En
 		current := queue[0]
 		queue = queue[1:]
 
-		items, listErr := sub.ReadDir(current)
+		items, listErr := sub.sftp.ReadDir(current)
 		if listErr != nil {
 			// A folder that cannot be read is skipped rather than failing the
 			// whole walk; permissions vary inside a container.
@@ -290,7 +360,7 @@ func (s *Session) Stat(ctx context.Context, remote string) (Entry, bool, error) 
 	}
 	defer s.give(sub)
 
-	info, statErr := sub.Stat(remote)
+	info, statErr := sub.sftp.Stat(remote)
 	if statErr != nil {
 		if errors.Is(statErr, os.ErrNotExist) {
 			return Entry{}, false, nil
@@ -312,7 +382,7 @@ func (s *Session) MkdirAll(ctx context.Context, dir string) error {
 		return err
 	}
 	defer s.give(sub)
-	return sub.MkdirAll(dir)
+	return sub.sftp.MkdirAll(dir)
 }
 
 /* -------------------------------------------------------------- transfer */
@@ -394,77 +464,20 @@ func (s *Session) Upload(ctx context.Context, jobs []Job, onProgress func(Progre
 		_ = s.MkdirAll(ctx, dir)
 	}
 
-	return s.each(ctx, jobs, onProgress, func(sub *sftp.Client, job Job, running *int64) (int64, error) {
-		src, err := os.Open(job.Local)
-		if err != nil {
-			return 0, err
-		}
-		defer src.Close()
-
-		dst, err := sub.Create(job.Remote)
-		if err != nil {
-			return 0, fmt.Errorf("cannot write %s: %w", job.Remote, err)
-		}
-
-		var moved int64
-		_, copyErr := io.Copy(io.MultiWriter(dst, counter{file: &moved, total: running}), src)
-
-		// Closed explicitly rather than deferred: the write is only finished
-		// when the far side says so, and a close error is a failed transfer.
-		closeErr := dst.Close()
-		if copyErr != nil {
-			return moved, copyErr
-		}
-		if closeErr != nil {
-			return moved, fmt.Errorf("cannot finish %s: %w", job.Remote, closeErr)
-		}
-		return moved, nil
+	return s.each(ctx, jobs, onProgress, func(job Job, running *int64) (int64, error) {
+		return s.sendFile(ctx, job, running)
 	})
 }
 
-// Download pulls every job, several at a time.
-//
-// Each file is written to a temporary name and moved into place at the end, so
-// an interrupted download never leaves something that looks complete.
+// Download pulls every job, several at a time, splitting the large ones across
+// connections the same way an upload does.
 func (s *Session) Download(ctx context.Context, jobs []Job, onProgress func(Progress)) Result {
 	for _, job := range jobs {
 		_ = os.MkdirAll(filepath.Dir(job.Local), 0o755)
 	}
 
-	return s.each(ctx, jobs, onProgress, func(sub *sftp.Client, job Job, running *int64) (int64, error) {
-		src, err := sub.Open(job.Remote)
-		if err != nil {
-			return 0, fmt.Errorf("cannot read %s: %w", job.Remote, err)
-		}
-		defer src.Close()
-
-		tmp := job.Local + ".part"
-		dst, err := os.Create(tmp)
-		if err != nil {
-			return 0, err
-		}
-
-		var moved int64
-		_, copyErr := io.Copy(io.MultiWriter(dst, counter{file: &moved, total: running}), src)
-		closeErr := dst.Close()
-
-		if copyErr != nil || closeErr != nil {
-			os.Remove(tmp)
-			if copyErr != nil {
-				return moved, copyErr
-			}
-			return moved, closeErr
-		}
-
-		if err := os.Rename(tmp, job.Local); err != nil {
-			// Windows will not always rename onto an existing file.
-			_ = os.Remove(job.Local)
-			if err2 := os.Rename(tmp, job.Local); err2 != nil {
-				os.Remove(tmp)
-				return moved, err2
-			}
-		}
-		return moved, nil
+	return s.each(ctx, jobs, onProgress, func(job Job, running *int64) (int64, error) {
+		return s.fetchFile(ctx, job, running)
 	})
 }
 
@@ -473,7 +486,7 @@ func (s *Session) each(
 	ctx context.Context,
 	jobs []Job,
 	onProgress func(Progress),
-	move func(*sftp.Client, Job, *int64) (int64, error),
+	move func(Job, *int64) (int64, error),
 ) Result {
 	started := time.Now()
 	result := Result{Files: make([]FileResult, len(jobs))}
@@ -537,14 +550,7 @@ func (s *Session) each(
 				job := jobs[index]
 				current.Store(job.Remote)
 
-				sub, err := s.borrow(ctx)
-				if err != nil {
-					result.Files[index] = FileResult{Job: job, Error: err.Error()}
-					continue
-				}
-
-				bytesHere, moveErr := move(sub, job, &moved)
-				s.give(sub)
+				bytesHere, moveErr := move(job, &moved)
 
 				atomic.AddInt64(&done, 1)
 
