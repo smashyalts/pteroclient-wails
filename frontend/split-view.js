@@ -197,6 +197,7 @@
         }
 
         st.path = target;
+        if (window.Folders) window.Folders.remember(st.serverID, target, files);
 
         (files || []).sort((a, b) => {
             if (a.isDir !== b.isDir) return b.isDir ? 1 : -1;
@@ -663,6 +664,44 @@
         });
     }
 
+    /**
+     * Puts the left workspace on whatever the main window is showing, without
+     * waiting for anything.
+     *
+     * The right one is deliberately left empty: opening a split on two copies
+     * of the same server is rarely what was wanted, and picking the second is
+     * one click.
+     */
+    function seedFromMainWindow() {
+        const source = $('serverDropdown');
+        if (!source || !source.value) return false;
+
+        const id = source.value;
+        const name = (source.selectedOptions[0] && source.selectedOptions[0].textContent) || id;
+        const panel = (function () {
+            const panels = $('panelDropdown');
+            if (!panels) return '';
+            const opt = panels.selectedOptions && panels.selectedOptions[0];
+            return opt ? opt.textContent : '';
+        }());
+
+        // A stand-in option so the name is on screen now rather than when the
+        // list arrives. fillServerSelects keeps the value it finds.
+        const sel = document.querySelector('#splitRoot [data-space="left"] [data-role="server"]');
+        if (sel) {
+            sel.innerHTML = '<option value="' + esc(id) + '">' + esc(name) + '</option>';
+            sel.value = id;
+        }
+
+        // Where the main explorer is, not the root: the split opens on the
+        // folder that was being looked at.
+        const st = space('left');
+        if (window.app && window.app.currentPath) st.path = window.app.currentPath;
+
+        setServer('left', id, name, panel);
+        return true;
+    }
+
     /* -------------------------------------------------------------- toggle */
 
     function open() {
@@ -696,15 +735,21 @@
         SIDES.forEach((side) => { buildEditor(side); renderTabs(side); });
         setFocus('left');
 
+        // Straight away, from what the main window already has on screen. The
+        // server list is a network call, and until it landed both dropdowns
+        // read "Choose a server..." — which is what looked like the split
+        // closing every server on the way in.
+        const seeded = seedFromMainWindow();
+
         loadServers().then(async () => {
             fillServerSelects();
             // await, not truthiness: restoreSplit is async, so the bare call
             // returned a promise, which is always truthy, and the seeding below
             // never ran — the left workspace opened empty every time.
             if (window.Session && await window.Session.restoreSplit()) return;
+            if (seeded) return;
 
-            // Nothing to restore: seed the left workspace from the main editor
-            // so the split opens on something.
+            // Nothing on screen to seed from and nothing to restore.
             const api = go();
             if (!api || !api.GetConfig) return;
             api.GetConfig().then((cfg) => {
@@ -890,6 +935,16 @@
         isActive: () => active,
         focus: setFocus,
         focusFilter: focusFilter,
+
+        // What the command palette acts on. With the split open there are two
+        // of everything, and Ctrl+K has to mean the one being worked in rather
+        // than the main window's single explorer behind it.
+        focusedSide: () => focused,
+        serverID: () => space(focused).serverID,
+        currentPath: () => space(focused).path || '/',
+        goTo: (path) => browse(focused, path),
+        useServer: (id, name, panel) => setServer(focused, id, name, panel),
+
         // Session restore reaches in through these.
         state: () => ({
             outer: outer,

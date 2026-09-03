@@ -631,6 +631,10 @@ function initApp() {
                 // A slower earlier request must not overwrite a newer folder.
                 if (token !== this.listToken) return;
                 this.dirCachePut(cacheKey, files || []);
+                // Ctrl+K can only offer a folder it has heard of, and this is
+                // where it hears about them - including subfolders nobody has
+                // opened yet.
+                if (window.Folders) window.Folders.remember(config.serverID, path, files);
                 this.renderFiles(files || []);
                 tree.classList.remove('stale');
             } catch (err) {
@@ -1391,6 +1395,9 @@ function initApp() {
                 file.modified = false;
                 this.updateTabModified(path, false);
                 console.log('File saved:', path, res && res.version_id ? '(version ' + res.version_id + ')' : '');
+                // Ctrl+S used to be silent, so there was no way to tell a save
+                // that worked from one that never fired.
+                this.reportSaved(file.name, res);
                 return true;
             } catch (err) {
                 await this.say('Failed to save file', String(err));
@@ -1398,13 +1405,44 @@ function initApp() {
             }
         },
 
+        /**
+         * Says a save happened, in two places.
+         *
+         * The toast is for the save you asked for; the button flash is for the
+         * one you did with Ctrl+S while looking at the text, where a toast in
+         * the corner is easy to miss.
+         */
+        reportSaved(name, res) {
+            const version = res && res.version_id
+                ? ' · previous version kept'
+                : '';
+            window.UX.toast.ok('Saved ' + name + version, { duration: 2200 });
+
+            const btn = document.getElementById('saveBtn');
+            if (!btn) return;
+            if (this.saveFlashTimer) clearTimeout(this.saveFlashTimer);
+            const label = btn.dataset.label || btn.textContent;
+            btn.dataset.label = label;
+            btn.textContent = 'Saved';
+            btn.classList.add('is-saved');
+            this.saveFlashTimer = setTimeout(() => {
+                btn.textContent = btn.dataset.label || 'Save';
+                btn.classList.remove('is-saved');
+                this.saveFlashTimer = null;
+            }, 1400);
+        },
+
         async saveAllFiles() {
+            let written = 0;
             for (const [path, file] of this.openFiles) {
                 if (file.modified) {
-                    await this.writeFile(path, file, false);
+                    if (await this.writeFile(path, file, false)) written++;
                 }
             }
             console.log('Save all finished');
+            if (written > 1) {
+                window.UX.toast.ok(written + ' files saved', { duration: 2200 });
+            }
         },
         
         async closeFile() {

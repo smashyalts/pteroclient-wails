@@ -93,9 +93,11 @@
         <button class="tab" data-tab="network" data-icon="network" type="button">Network</button>
         <button class="tab" data-tab="startup" data-icon="sliders" type="button">Startup</button>
         <button class="tab" data-tab="settings" data-icon="cog" type="button">Server</button>
+        <!-- Activity is this server's audit log, so it belongs with the
+             server's own tabs. Below the separator are the app's. -->
+        <button class="tab" data-tab="activity" data-icon="activity" type="button">Activity</button>
         <div class="rail-sep"></div>
         <button class="tab" data-tab="vault" data-icon="shield" type="button">Vault</button>
-        <button class="tab" data-tab="activity" data-icon="activity" type="button">Activity</button>
         <button class="tab" data-tab="appearance" data-icon="palette" type="button">Look</button>
     </nav>
 
@@ -419,6 +421,7 @@
 
 <script src="./icons.js"></script>
 <script src="./themes.js"></script>
+<script src="./folders.js"></script>
 <script src="./ux.js"></script>
 <script src="./main-editor.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.45.0/min/vs/loader.min.js"></script>

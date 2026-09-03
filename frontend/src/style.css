@@ -1824,6 +1824,11 @@ body.resizing .split-grip { background: var(--accent); }
 .ws {
     display: flex;
     flex-direction: column;
+    /* flex-basis 0, not auto. With auto the base size is the content's, so a
+       long server name in the dropdown or a wide file path moved the divider
+       on its own — the split appeared to resize itself whenever a button was
+       pressed. Now only flex-grow decides, and only the grip changes that. */
+    flex-basis: 0;
     min-width: 0;
     min-height: 0;
     border-left: 1px solid var(--line-strong);
@@ -1843,6 +1848,15 @@ body.resizing .split-grip { background: var(--accent); }
 }
 
 .ws-head .spacer { flex: 1; }
+
+/* The dropdown holds server names of any length. Without a floor of zero its
+   intrinsic width becomes the header's, and the header's becomes the
+   workspace's — which is the other half of the split jumping about whenever a
+   server was picked. */
+.ws-head > select {
+    min-width: 0;
+    flex: 1 1 0;
+}
 
 .ws-focus {
     width: 6px;
@@ -2470,6 +2484,9 @@ body.console-window .logo-sub::after { content: " · console"; }
    ========================================================================== */
 
 .theme-card {
+    /* The card can be narrow, and its buttons wrap rather than spilling out
+       of a fixed row. */
+    min-width: 0;
     overflow: hidden;
     border: 1px solid var(--line-strong);
     transition: border-color .12s ease;
@@ -2507,8 +2524,13 @@ body.console-window .logo-sub::after { content: " · console"; }
     display: block;
 }
 
+/* A grid, not a flex row. The hex box is an input[type="text"], which the
+   base rule sizes to 100% at a specificity the .theme-hex class could not
+   beat — so it filled the row and pushed the label on top of it. Explicit
+   tracks make the layout independent of what the inputs think they want. */
 .theme-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: 38px minmax(0, 1fr) 108px;
     align-items: center;
     gap: 11px;
     padding: 7px 0;
@@ -2518,7 +2540,6 @@ body.console-window .logo-sub::after { content: " · console"; }
 .theme-row:last-of-type { border-bottom: 0; }
 
 .theme-row input[type="color"] {
-    flex: none;
     width: 38px;
     height: 28px;
     padding: 0;
@@ -2528,11 +2549,20 @@ body.console-window .logo-sub::after { content: " · console"; }
     cursor: pointer;
 }
 
-.theme-hex {
-    flex: none;
-    width: 92px;
+/* input.theme-hex, not .theme-hex: the base input[type="text"] rule is more
+   specific than a bare class and was winning. */
+input.theme-hex {
+    width: 100%;
+    min-width: 0;
     text-align: center;
     font-size: 12px;
+}
+
+.theme-row .list-title {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 3px 0;
 }
 
 .theme-ratio {

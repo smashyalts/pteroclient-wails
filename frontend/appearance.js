@@ -40,7 +40,9 @@
 
         /* ---- the picker ---- */
         html += '<div class="eyebrow" style="margin-bottom:9px">Theme</div>';
-        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:10px">';
+        // 250px, not 215: at the smaller size "Copy and edit" beside "Use" ran
+        // out of the card, and the name and its badge were clipped.
+        html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:10px">';
         themes.forEach((t) => {
             const on = t.id === currentID && !draft;
             const k = t.tokens;
@@ -59,7 +61,7 @@
                 (on ? ' <span class="list-badge">in use</span>' : '') +
                 (t.builtIn ? '' : ' <span class="list-badge">yours</span>') + '</div>' +
                 '<div class="list-sub" style="margin-top:3px">' + esc(t.note) + '</div>' +
-                '<div style="display:flex;gap:6px;margin-top:9px">' +
+                '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:9px">' +
                 '<button class="sm" data-use="' + esc(t.id) + '" type="button">Use</button>' +
                 '<button class="sm" data-edit="' + esc(t.id) + '" type="button">' +
                 (t.builtIn ? 'Copy and edit' : 'Edit') + '</button>' +
@@ -110,6 +112,7 @@
                 '<button class="primary" id="themeSaveBtn" type="button">Save</button>' +
                 '<button id="themeCancelBtn" type="button">Cancel</button>' +
                 '<div class="spacer"></div>' +
+                '<button id="themeImportBtn" type="button">Paste JSON</button>' +
                 '<button id="themeExportBtn" type="button">Copy as JSON</button>' +
                 '</div></div>';
         }
@@ -198,6 +201,68 @@
             draft = null;
             render();
             window.UX.toast.ok('Saved "' + name + '"');
+            return;
+        }
+
+        if (btn.id === 'themeImportBtn') {
+            if (!draft) return;
+            // A box rather than reading the clipboard directly: clipboard read
+            // needs a permission this does not otherwise ask for, and a box
+            // also takes a theme someone pasted into a chat message.
+            const typed = await window.Shell.dialog.form('Paste a theme', [
+                { name: 'json', label: 'Theme JSON', type: 'textarea', rows: 10, mono: true,
+                  placeholder: '{ "name": "...", "tokens": { ... } }' }
+            ], { confirmLabel: 'Apply' });
+            if (!typed) return;
+
+            let parsed;
+            try {
+                parsed = JSON.parse(String(typed.json || ''));
+            } catch (err) {
+                await window.Shell.dialog.confirm('That is not JSON',
+                    esc(String(err)), { confirmLabel: 'OK' });
+                return;
+            }
+
+            // Accept either the exported shape or a bare token map, since a
+            // half-remembered paste is more likely than a wrong one.
+            const tokens = (parsed && parsed.tokens) ? parsed.tokens : parsed;
+            if (!tokens || typeof tokens !== 'object') {
+                await window.Shell.dialog.confirm('Nothing to apply',
+                    'That JSON has no colours in it.', { confirmLabel: 'OK' });
+                return;
+            }
+
+            // Only keys this app knows, and only values that are colours. A
+            // paste is untrusted text, and these end up in a style attribute.
+            const known = new Set(window.Themes.tokens.map(t => t.key));
+            let taken = 0;
+            let ignored = 0;
+            Object.keys(tokens).forEach((key) => {
+                const value = String(tokens[key] || '').trim();
+                if (!known.has(key) || !/^#[0-9a-f]{6}$/i.test(value)) {
+                    ignored++;
+                    return;
+                }
+                draft.tokens[key] = value.toLowerCase();
+                taken++;
+            });
+
+            if (!taken) {
+                await window.Shell.dialog.confirm('Nothing to apply',
+                    'None of those keys are colours this app uses.', { confirmLabel: 'OK' });
+                return;
+            }
+
+            if (typeof parsed.name === 'string' && parsed.name.trim()) {
+                draft.name = parsed.name.trim().slice(0, 60);
+            }
+
+            window.Themes.preview(draft.tokens);
+            render();
+            window.UX.toast.ok(taken + ' colour(s) applied' +
+                (ignored ? ', ' + ignored + ' ignored' : '') +
+                '. Nothing is stored until you press Save.');
             return;
         }
 

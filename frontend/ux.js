@@ -241,11 +241,14 @@
         overlay.classList.add('show');
         const input = $('paletteInput');
         refreshAllServers();
-        input.value = mode === 'servers' ? '>' : '';
+        // No '>' prefix any more. Ctrl+K opened on servers only, so jumping to
+        // a folder meant a different shortcut; now both are one list and '>'
+        // is still there for anyone who wants servers alone.
+        input.value = '';
         input.placeholder = mode === 'servers'
-            ? 'Switch server — type to filter, ↑ ↓ to move, Enter to pick'
-            : 'Type a command or a server name…';
-        paletteBuild(input.value);
+            ? 'Go to a server or a folder — or type a path like /plugins'
+            : 'Type a command, a server, or a path…';
+        paletteBuild('');
         setTimeout(() => input.focus(), 20);
     }
 
@@ -272,12 +275,76 @@
         }).catch(() => { /* one unreachable panel should not empty the list */ });
     }
 
+    /**
+     * The explorer Ctrl+K acts on.
+     *
+     * With the split view open there are two, and the one being worked in is
+     * the one that should move. Without it there is only the main window's.
+     */
+    function navTarget() {
+        const split = window.SplitView;
+        if (split && split.isActive() && split.serverID()) {
+            return {
+                split: true,
+                serverID: split.serverID(),
+                currentPath: split.currentPath(),
+                where: 'the ' + split.focusedSide() + ' workspace',
+                goTo: (path) => split.goTo(path)
+            };
+        }
+        const app = window.app;
+        if (!app) return null;
+        const sel = $('serverDropdown');
+        return {
+            split: false,
+            serverID: sel ? sel.value : '',
+            currentPath: app.currentPath || '/',
+            where: '',
+            goTo: (path) => {
+                window.Shell.showTab('files');
+                app.loadFiles(path);
+            }
+        };
+    }
+
+    function folderItems(target) {
+        if (!target || !target.serverID || !window.Folders) return [];
+        // Most recently seen first, so somewhere just visited is at the top
+        // before a single character is typed.
+        return window.Folders.list(target.serverID).slice(0, 400).map((path) => ({
+            kind: 'folder',
+            icon: 'folder',
+            label: path,
+            hint: target.where,
+            current: path === target.currentPath,
+            run: () => target.goTo(path)
+        }));
+    }
+
     function paletteSources() {
         const items = [];
+        const split = window.SplitView;
+        const inSplit = !!(split && split.isActive());
+
+        // With the split open a server goes into the workspace being worked
+        // in, not into the main window behind it.
+        const useServer = (id, name, panel) => {
+            if (inSplit) return split.useServer(id, name, panel);
+            const sel = $('serverDropdown');
+            if (sel && Array.from(sel.options).some(o => o.value === id)) {
+                sel.value = id;
+                sel.dispatchEvent(new Event('change'));
+                return;
+            }
+            // Not on the active panel: SwitchServer moves to the right one
+            // first, so picking it from here just works.
+            if (window.app) window.app.switchServer(id);
+        };
 
         // Servers first: switching is the thing this is opened for most.
         const servers = $('serverDropdown');
         const onThisPanel = new Set();
+        const where = inSplit ? ' · ' + split.focusedSide() : '';
         if (servers) {
             Array.from(servers.options).forEach((opt) => {
                 if (!opt.value) return;
@@ -286,28 +353,27 @@
                     kind: 'server',
                     icon: 'server',
                     label: opt.textContent,
-                    hint: opt.value,
-                    current: opt.value === servers.value,
-                    run: () => {
-                        servers.value = opt.value;
-                        servers.dispatchEvent(new Event('change'));
-                    }
+                    hint: opt.value + where,
+                    current: !inSplit && opt.value === servers.value,
+                    run: () => useServer(opt.value, opt.textContent, opt.dataset.panel || '')
                 });
             });
         }
 
-        // Then everything on the other panels. SwitchServer moves to the
-        // right panel first, so picking one from here just works.
+        // Then everything on the other panels.
         allServers.forEach((ref) => {
             if (!ref || !ref.id || onThisPanel.has(ref.id)) return;
             items.push({
                 kind: 'server',
                 icon: 'server',
                 label: (ref.name || ref.id) + ' · ' + (ref.panel || ''),
-                hint: ref.id,
-                run: () => window.app && window.app.switchServer(ref.id)
+                hint: ref.id + where,
+                run: () => useServer(ref.id, ref.name || ref.id, ref.panel || '')
             });
         });
+
+        // Folders next: the other thing this is opened for.
+        folderItems(navTarget()).forEach((item) => items.push(item));
 
         const panels = $('panelDropdown');
         if (panels) {
@@ -352,12 +418,35 @@
             q = q.slice(1).trim();
         }
 
+        // A path, typed out. '/' is from the root, '~/' from wherever the
+        // explorer is now, which is the shorter one to type most of the time.
+        const target = navTarget();
+        const typedPath = window.Folders
+            ? window.Folders.resolve(q, target ? target.currentPath : '/')
+            : null;
+
         const needle = q.toLowerCase();
         paletteItems = paletteSources().filter((item) => {
             if (only && item.kind !== only) return false;
             if (!needle) return true;
             return (item.label + ' ' + item.hint).toLowerCase().indexOf(needle) !== -1;
         });
+
+        if (typedPath && target) {
+            // First, and only once: a path already in the list is the same
+            // destination, so it is promoted rather than duplicated.
+            const already = paletteItems.findIndex(
+                (item) => item.kind === 'folder' && item.label === typedPath);
+            if (already !== -1) paletteItems.splice(already, 1);
+
+            paletteItems.unshift({
+                kind: 'folder',
+                icon: 'folder',
+                label: typedPath,
+                hint: 'go there' + (target.where ? ' in ' + target.where : ''),
+                run: () => target.goTo(typedPath)
+            });
+        }
 
         paletteIndex = 0;
         paletteRender();

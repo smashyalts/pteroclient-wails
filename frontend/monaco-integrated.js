@@ -333,6 +333,12 @@ function replaceEditor() {
         },
         
         setValue(content) {
+            // Writing text a model already holds still counts as an edit:
+            // it clears the undo stack and puts the cursor back at the top.
+            if (monacoEditor) {
+                const model = monacoEditor.getModel();
+                if (model && model.getValue() === content) return;
+            }
             if (monacoEditor) {
                 const currentModel = monacoEditor.getModel();
                 if (currentModel) {
@@ -439,9 +445,19 @@ function replaceEditor() {
     // with editor.setValue(file.content), and setValue writes into whichever
     // model is currently attached — doing it the other way round wrote the
     // incoming file's text into the outgoing file's model.
+    // Where each file was left: scroll position, cursor, folded regions.
+    // Models kept the text across a switch but not the view, so every tab
+    // change threw you back to line 1 of a file you were halfway down.
+    const viewStates = new Map();
+
     const originalSwitchToFile = app.switchToFile;
     app.switchToFile = function(path) {
         if (monacoEditor) {
+            // The outgoing file's position, before anything moves.
+            if (this.activeFile && this.activeFile !== path && monacoEditor.getModel()) {
+                viewStates.set(this.activeFile, monacoEditor.saveViewState());
+            }
+
             let model = monacoModels.get(path);
             const file = this.openFiles.get(path);
 
@@ -456,6 +472,14 @@ function replaceEditor() {
         }
 
         originalSwitchToFile.call(this, path);
+
+        // After the base call, not before: it ends in setValue, and restoring
+        // ahead of that would be undone by it.
+        if (monacoEditor) {
+            const view = viewStates.get(path);
+            if (view) monacoEditor.restoreViewState(view);
+            monacoEditor.focus();
+        }
     };
     
     // Override closeFileTab to dispose models
@@ -467,6 +491,9 @@ function replaceEditor() {
             model.dispose();
             monacoModels.delete(path);
         }
+        // A closed file has no position worth keeping, and holding one would
+        // apply it to whatever later opened at the same path.
+        viewStates.delete(path);
         
         originalCloseFileTab.call(this, path);
 
