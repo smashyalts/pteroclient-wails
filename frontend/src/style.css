@@ -1034,6 +1034,28 @@ textarea.mono {
     word-break: break-word;
 }
 
+/* A link in console output. Underlined rather than only recoloured: the
+   console already recolours half its lines, so colour alone would not read as
+   "this one is clickable". */
+.console-link {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    text-decoration-color: var(--accent-soft);
+    cursor: pointer;
+    border-radius: 3px;
+}
+
+.console-link:hover {
+    text-decoration-color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.console-link:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
 .console-line.info { color: #79b8ff; }
 .console-line.error { color: #ff7b72; }
 .console-line.command { color: var(--success-text); }

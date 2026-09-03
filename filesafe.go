@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -2695,6 +2696,48 @@ func (a *App) lastKnownServers() []pterodactyl.ServerInfo {
 		return nil
 	}
 	return servers
+}
+
+/* ------------------------------------------------------- external links */
+
+// externalURLMax is a length past which a "link" is a payload, not a link.
+const externalURLMax = 2048
+
+// OpenExternalURL hands a link from the console to the system browser.
+//
+// Console output is whatever is running on somebody's server, so this is not a
+// general "open anything" call. Only http and https, only a URL that parses
+// with a host, and only on a click — nothing here opens on its own. The app's
+// own window never navigates: a link that replaced the UI with a web page would
+// be a way to take the whole thing over.
+func (a *App) OpenExternalURL(raw string) error {
+	if a.ctx == nil {
+		return errors.New("no window to open a link from")
+	}
+
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return errors.New("no link")
+	}
+	if len(trimmed) > externalURLMax {
+		return errors.New("that link is too long to open")
+	}
+
+	parsed, err := url.Parse(trimmed)
+	if err != nil {
+		return fmt.Errorf("not a link this can open: %w", err)
+	}
+	// Explicitly not a default: a scheme this does not know is a scheme it
+	// does not hand to the shell.
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return fmt.Errorf("only http and https links open in the browser, not %q", parsed.Scheme)
+	}
+	if parsed.Host == "" {
+		return errors.New("that link has no host")
+	}
+
+	runtime.BrowserOpenURL(a.ctx, parsed.String())
+	return nil
 }
 
 /* ------------------------------------------------------------- searching */

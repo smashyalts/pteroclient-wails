@@ -287,6 +287,7 @@ function initApp() {
             this.restoreCommandHistory();
             this.restoreTreeDock();
             this.restoreFileDetails();
+            this.wireConsoleLinks();
         },
 
         restoreCommandHistory() {
@@ -2438,8 +2439,9 @@ function initApp() {
             line.className = 'console-line';
             if (type) line.classList.add(type);
             
-            // Convert ANSI codes to HTML for colored output
-            line.innerHTML = this.ansiToHtml(message);
+            // Convert ANSI codes to HTML for colored output, then make any
+            // links in it clickable.
+            line.innerHTML = this.linkifyConsole(this.ansiToHtml(message));
             
             consoleEl.appendChild(line);
             consoleEl.scrollTop = consoleEl.scrollHeight;
@@ -2449,6 +2451,81 @@ function initApp() {
             }
         },
         
+        /**
+         * Turn http(s) links in a console line into something clickable.
+         *
+         * Only the text between tags is scanned. Running the pattern over the
+         * whole string would find "http" inside a style attribute the ANSI
+         * pass had just written, and wrap a tag in an anchor.
+         *
+         * The text arriving here is already HTML-escaped, so an entity like
+         * &amp; inside a query string survives into the attribute and the DOM
+         * decodes it back to & when the handler reads it.
+         */
+        linkifyConsole(html) {
+            const URL_RE = /https?:\/\/[^\s<>"']+/g;
+            // Trailing punctuation is almost never part of the link — a URL at
+            // the end of a sentence, or one in brackets.
+            const TAIL = /[.,;:!?)\]}'"]$|&(?:quot|#39|gt|lt|amp);$/;
+
+            return html.split(/(<[^>]*>)/).map((part) => {
+                if (part.charAt(0) === '<') return part;
+                return part.replace(URL_RE, (match) => {
+                    let url = match;
+                    let tail = '';
+                    let cut;
+                    while (url && (cut = url.match(TAIL))) {
+                        tail = url.slice(cut.index) + tail;
+                        url = url.slice(0, cut.index);
+                    }
+                    if (!url) return match;
+                    return '<a class="console-link" role="link" tabindex="0" data-url="' +
+                        url.replace(/"/g, '&quot;') +
+                        '" title="Open in your browser">' + url + '</a>' + tail;
+                });
+            }).join('');
+        },
+
+        /**
+         * One handler on the console rather than one per line: lines are
+         * appended constantly and capped at a thousand, so per-line listeners
+         * would be churn for nothing.
+         *
+         * The window itself never navigates. The link goes to the system
+         * browser through the Go side, which checks the scheme — console output
+         * comes from whatever is running on the server, and it is not trusted
+         * to name what gets opened.
+         */
+        wireConsoleLinks() {
+            const consoleEl = document.getElementById('console');
+            if (!consoleEl || consoleEl.dataset.linksWired) return;
+            consoleEl.dataset.linksWired = '1';
+
+            const open = (link) => {
+                const url = link && link.dataset.url;
+                if (!url) return;
+                window.go.main.App.OpenExternalURL(url).catch((err) => {
+                    window.UX.toast.bad('Could not open that link: ' + err);
+                });
+            };
+
+            consoleEl.addEventListener('click', (e) => {
+                const link = e.target.closest('.console-link');
+                if (!link) return;
+                e.preventDefault();
+                open(link);
+            });
+
+            // Reachable without a mouse, since it is focusable.
+            consoleEl.addEventListener('keydown', (e) => {
+                if (e.key !== 'Enter' && e.key !== ' ') return;
+                const link = e.target.closest && e.target.closest('.console-link');
+                if (!link) return;
+                e.preventDefault();
+                open(link);
+            });
+        },
+
         ansiToHtml(text) {
             // Handle various ANSI escape sequences
             let html = this.escapeHtmlForConsole(text);
