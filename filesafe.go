@@ -204,7 +204,7 @@ func (a *App) withServerClient(serverID string, fn func(c *pterodactyl.Client, p
 	}
 	panelName, ok := a.serverPanelMap[serverID]
 	if !ok {
-		a.RefreshAllServerMappings()
+		a.refreshServerMappingsLocked()
 		panelName, ok = a.serverPanelMap[serverID]
 		if !ok {
 			return fmt.Errorf("server %s is not on any configured panel", serverID)
@@ -251,7 +251,7 @@ func (a *App) dedicatedClient(serverID string) (*pterodactyl.Client, string, err
 	}
 	panelName, ok := a.serverPanelMap[serverID]
 	if !ok {
-		a.RefreshAllServerMappings()
+		a.refreshServerMappingsLocked()
 		panelName, ok = a.serverPanelMap[serverID]
 		if !ok {
 			return nil, "", fmt.Errorf("server %s is not on any configured panel", serverID)
@@ -340,7 +340,7 @@ func (a *App) activeServerID() string {
 // A file too large to hold still gets an entry, marked uncaptured, so the UI
 // can say plainly that this one is not recoverable rather than implying it is.
 func (a *App) captureRemote(kind safestore.Kind, c *pterodactyl.Client, panel, serverID, remotePath, reason string, knownSize int64) (safestore.Entry, error) {
-	return a.captureBytes(kind, c, panel, serverID, remotePath, reason, knownSize, nil)
+	return a.captureBytes(kind, c, panel, serverID, remotePath, reason, knownSize, nil, false)
 }
 
 // captureBytes is captureRemote for a caller that already holds the content.
@@ -348,7 +348,10 @@ func (a *App) captureRemote(kind safestore.Kind, c *pterodactyl.Client, panel, s
 // A save has just read the file to compare against the editor's baseline;
 // fetching it a second time to put in the history doubled the transfer of every
 // save for no gain.
-func (a *App) captureBytes(kind safestore.Kind, c *pterodactyl.Client, panel, serverID, remotePath, reason string, knownSize int64, known []byte) (safestore.Entry, error) {
+// haveKnown says the caller supplied the content, rather than the content
+// merely being non-nil: an empty file is legitimately zero bytes, and
+// []byte("") being non-nil is a property of the compiler, not the language.
+func (a *App) captureBytes(kind safestore.Kind, c *pterodactyl.Client, panel, serverID, remotePath, reason string, knownSize int64, known []byte, haveKnown bool) (safestore.Entry, error) {
 	if a.store == nil {
 		return safestore.Entry{}, errors.New("local store unavailable")
 	}
@@ -360,7 +363,7 @@ func (a *App) captureBytes(kind safestore.Kind, c *pterodactyl.Client, panel, se
 		Reason: reason,
 	}
 
-	if known != nil {
+	if haveKnown {
 		if int64(len(known)) > safestore.MaxSingleCapture {
 			meta.Note = fmt.Sprintf("file is %d bytes, over the %d byte capture limit",
 				len(known), safestore.MaxSingleCapture)
@@ -477,7 +480,7 @@ func (a *App) SafeSaveFileContentToServer(serverID, remotePath, content, expecte
 			// history. A write whose history entry failed is refused: saving
 			// anyway would be the one case with no way back.
 			entry, captureErr := a.captureBytes(safestore.KindVersion, c, panel,
-				serverIDOr(serverID, c), cleaned, "edited", int64(len(remote)), []byte(remote))
+				serverIDOr(serverID, c), cleaned, "edited", int64(len(remote)), []byte(remote), true)
 			if captureErr != nil {
 				return fmt.Errorf("refusing to write: saving the previous version locally failed: %w", captureErr)
 			}
@@ -788,6 +791,19 @@ func (a *App) PlanDelete(serverID string, paths []string) (*DeletePlan, error) {
 				// The selection is stale. Say so rather than deleting whatever
 				// happens to carry that name now.
 				return fmt.Errorf("%s no longer exists — refresh the file list", root)
+			}
+
+			if found.IsSymlink {
+				// Same rule walkForDelete applies: the target is not what is
+				// being deleted, so copying it would fill the bin with content
+				// that is not going anywhere — and restoring it would put a
+				// real file where a link used to be.
+				plan.Items = append(plan.Items, DeleteItem{
+					Path: root, Name: found.Name, IsDir: false,
+					Level: ProtectSensitive, Reason: "a symlink; its target is not captured",
+				})
+				plan.FileCount++
+				continue
 			}
 
 			isDir := !found.IsFile && !found.IsSymlink
@@ -1119,7 +1135,11 @@ func (a *App) SafeDeleteFiles(token string) (*DeleteOutcome, error) {
 
 			entry, err := a.store.Put(safestore.KindBin, meta, content)
 			if err != nil {
-				if errors.Is(err, safestore.ErrTooLarge) {
+				// Too big on its own, or no room left that is not this same
+				// delete's own copies. Either way the file is going and there
+				// will be no way back, so it is named rather than counted as
+				// captured.
+				if errors.Is(err, safestore.ErrTooLarge) || errors.Is(err, safestore.ErrWouldEvictBatch) {
 					meta.Note = err.Error()
 					placeholder, putErr := a.store.Put(safestore.KindBin, meta, nil)
 					if putErr != nil {
@@ -1896,8 +1916,15 @@ func (a *App) DecompressFile(remotePath string, intoNewFolder bool) (string, err
 
 		// Put it back either way, so a failed extract does not leave the
 		// archive buried in a folder the user did not ask for.
-		if moveBackErr := c.RenameFile(dir, inner, name); moveBackErr != nil && decompressErr == nil {
-			return fmt.Errorf("extracted into %s, but the archive could not be moved back: %w", target, moveBackErr)
+		if moveBackErr := c.RenameFile(dir, inner, name); moveBackErr != nil {
+			if decompressErr == nil {
+				return fmt.Errorf("extracted into %s, but the archive could not be moved back: %w", target, moveBackErr)
+			}
+			// Both failed. Reporting only the extract would leave the user
+			// looking for an archive that is now inside a folder they never
+			// asked for and were never told about.
+			return fmt.Errorf("could not extract (%v), and the archive was left in %s: %w",
+				decompressErr, target, moveBackErr)
 		}
 		return decompressErr
 	})
@@ -2700,9 +2727,17 @@ func (a *App) UploadBatch(baseDir string, items []UploadItem, overwrite, keepCop
 	err = a.withServerClient("", func(c *pterodactyl.Client, panel string) error {
 		// Every directory the batch needs, shallowest first so each one has a
 		// parent by the time it is made. Already-exists is the normal case.
+		// Every ancestor between base and the file, not only the file's own
+		// parent: an upload of mods/a/b/x.jar used to put just /mods/a/b in
+		// this set and then fail creating it, because /mods/a was never made.
 		dirs := map[string]bool{}
 		for _, item := range ready {
-			dirs[item.dir] = true
+			for dir := item.dir; dir != "/" && dir != base && dir != "."; dir = path.Dir(dir) {
+				if dirs[dir] {
+					break
+				}
+				dirs[dir] = true
+			}
 		}
 		ordered := make([]string, 0, len(dirs))
 		for dir := range dirs {
@@ -2749,6 +2784,7 @@ func (a *App) UploadBatch(baseDir string, items []UploadItem, overwrite, keepCop
 
 		for _, item := range ready {
 			here := listOf(item.dir)
+			undoCopy := ""
 
 			if found, clash := here[item.name]; clash {
 				if !overwrite {
@@ -2760,11 +2796,16 @@ func (a *App) UploadBatch(baseDir string, items []UploadItem, overwrite, keepCop
 					continue
 				}
 				if keepCopy {
-					if _, captureErr := a.captureRemote(safestore.KindBin, c, panel, c.GetServerID(),
-						item.path, "replaced by an upload", found.Size); captureErr != nil {
+					copyEntry, captureErr := a.captureRemote(safestore.KindBin, c, panel, c.GetServerID(),
+						item.path, "replaced by an upload", found.Size)
+					if captureErr != nil {
 						out.Failed = append(out.Failed, item.path+" — keeping a copy failed: "+captureErr.Error())
 						continue
 					}
+					// Only meaningful if the upload that follows works. A bin
+					// entry for a replacement that never happened charges the
+					// bin's budget and offers a restore that does nothing.
+					undoCopy = copyEntry.ID
 				}
 				out.Replaced = append(out.Replaced, item.path)
 			} else {
@@ -2772,7 +2813,11 @@ func (a *App) UploadBatch(baseDir string, items []UploadItem, overwrite, keepCop
 			}
 
 			if uploadErr := c.UploadFile(item.dir, item.name, bytes.NewReader(item.content)); uploadErr != nil {
-				// Take it back out of whichever list it was optimistically added to.
+				// Take it back out of whichever list it was optimistically
+				// added to, and drop the copy of a file that is still there.
+				if undoCopy != "" {
+					_ = a.store.Remove(safestore.KindBin, undoCopy)
+				}
 				out.Uploaded = withoutLast(out.Uploaded, item.path)
 				out.Replaced = withoutLast(out.Replaced, item.path)
 				out.Failed = append(out.Failed, item.path+" — "+uploadErr.Error())

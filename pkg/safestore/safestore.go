@@ -60,6 +60,13 @@ const (
 // so no amount of eviction would make room for it.
 var ErrTooLarge = errors.New("file is larger than the store's limit")
 
+// ErrWouldEvictBatch is returned when the only way to fit a copy would be to
+// throw away another copy from the same operation. A delete's own recycle-bin
+// copies are never the thing that gets evicted to make room for the rest of
+// that delete — the caller is told instead, so it can report the file as
+// unrecoverable rather than pretending it was saved.
+var ErrWouldEvictBatch = errors.New("no room without evicting this operation's own copies")
+
 // ErrNotFound is returned for an unknown entry id.
 var ErrNotFound = errors.New("entry not found")
 
@@ -275,7 +282,7 @@ func (s *Store) Put(kind Kind, meta Entry, data []byte) (Entry, error) {
 
 	// Make room before writing, never after: an interrupted Put must not leave
 	// the store over its cap.
-	if err := s.pruneLocked(kind, size); err != nil {
+	if err := s.pruneLocked(kind, size, meta.Batch); err != nil {
 		return Entry{}, err
 	}
 
@@ -360,7 +367,9 @@ func (s *Store) ListBatch(kind Kind, batch string) []Entry {
 			out = append(out, e)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	// Stable: two captures can share a timestamp, and a batch restore replays
+	// in this order.
+	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out
 }
 
@@ -371,7 +380,7 @@ func (s *Store) List(kind Kind) []Entry {
 
 	out := make([]Entry, len(s.data[kind].Entries))
 	copy(out, s.data[kind].Entries)
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
+	sort.SliceStable(out, func(i, j int) bool { return out[i].CreatedAt.After(out[j].CreatedAt) })
 	return out
 }
 
@@ -451,7 +460,7 @@ func (s *Store) Empty(kind Kind) error {
 // copy of a file that still has an older one is worse than losing an old copy
 // of a file that has several. Only if that is not enough does the second pass
 // take those too.
-func (s *Store) pruneLocked(kind Kind, incoming int64) error {
+func (s *Store) pruneLocked(kind Kind, incoming int64, protectBatch string) error {
 	limit := s.limits[kind]
 	if s.usageLocked(kind)+incoming <= limit {
 		return nil
@@ -485,6 +494,13 @@ func (s *Store) pruneLocked(kind Kind, incoming int64) error {
 			if drop[i] {
 				continue
 			}
+			// Never evict a copy this same operation just made. Deleting a
+			// folder bigger than the bin used to walk forward throwing away
+			// its own earlier copies, and the files they belonged to were
+			// then removed from the panel for real.
+			if protectBatch != "" && entries[i].Batch == protectBatch {
+				continue
+			}
 			if pass == 0 && newest[entries[i].Key()] == i {
 				continue
 			}
@@ -494,6 +510,15 @@ func (s *Store) pruneLocked(kind Kind, incoming int64) error {
 		if used+incoming <= limit {
 			break
 		}
+	}
+
+	if used+incoming > limit {
+		// Everything evictable is already spoken for. Saying so beats writing
+		// the copy anyway and leaving the store over its own cap.
+		if protectBatch != "" {
+			return ErrWouldEvictBatch
+		}
+		return fmt.Errorf("%w: %d bytes does not fit in %d", ErrTooLarge, incoming, limit)
 	}
 
 	if len(drop) == 0 {
@@ -627,16 +652,25 @@ func writeFileAtomic(dest string, data []byte, perm os.FileMode) error {
 		return err
 	}
 
-	// Windows will not rename onto an existing file.
+	// Windows will not always rename onto an existing file. The old fallback
+	// deleted the destination and then renamed, which left a window with no
+	// file there at all — losing an index outright rather than replacing it.
+	// The existing file is moved aside instead, and only dropped once the new
+	// one is in place.
 	if err := os.Rename(tmpName, dest); err != nil {
-		if removeErr := os.Remove(dest); removeErr != nil && !os.IsNotExist(removeErr) {
+		aside := dest + ".replacing"
+		_ = os.Remove(aside)
+		if moveErr := os.Rename(dest, aside); moveErr != nil && !os.IsNotExist(moveErr) {
 			os.Remove(tmpName)
 			return err
 		}
 		if err2 := os.Rename(tmpName, dest); err2 != nil {
+			// Put the original back rather than leaving nothing behind.
+			_ = os.Rename(aside, dest)
 			os.Remove(tmpName)
 			return err2
 		}
+		_ = os.Remove(aside)
 	}
 	return nil
 }

@@ -336,10 +336,17 @@ func (a *App) ListAllServers() ([]ServerRef, error) {
 			continue
 		}
 
+		// Under fileMu: file operations read this map, and Wails runs this
+		// binding on its own goroutine.
+		a.fileMu.Lock()
+		if a.serverPanelMap == nil {
+			a.serverPanelMap = make(map[string]string)
+		}
 		for _, s := range servers {
 			a.serverPanelMap[s.ID] = panel.Name
 			refs = append(refs, ServerRef{ID: s.ID, Name: s.Name, Panel: panel.Name})
 		}
+		a.fileMu.Unlock()
 	}
 
 	if len(refs) == 0 && lastErr != nil {

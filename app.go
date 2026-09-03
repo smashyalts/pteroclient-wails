@@ -219,7 +219,21 @@ func (a *App) Connect() error {
 }
 
 // RefreshAllServerMappings refreshes server mappings from all configured panels
+// RefreshAllServerMappings rebuilds the server-to-panel map.
+//
+// Exported, so Wails runs it on its own goroutine — and every file operation
+// reads this map under fileMu. Writing it unlocked was a concurrent map access
+// that takes the whole process down, possibly part way through a delete.
 func (a *App) RefreshAllServerMappings() {
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+	a.refreshServerMappingsLocked()
+}
+
+// refreshServerMappingsLocked is the body of the above, for callers that
+// already hold fileMu. withServerClient is one, so the exported form cannot be
+// called from there without deadlocking.
+func (a *App) refreshServerMappingsLocked() {
 	// Clear existing mappings to avoid stale entries
 	a.serverPanelMap = make(map[string]string)
 
@@ -264,11 +278,17 @@ func (a *App) ListServers() ([]map[string]interface{}, error) {
 		return nil, err
 	}
 
-	// Map servers to the current panel
+	// Map servers to the current panel. Under fileMu: this map is read by
+	// every file operation, and Wails calls this binding on its own goroutine.
 	currentPanel := a.config.GetActivePanelName()
+	a.fileMu.Lock()
+	if a.serverPanelMap == nil {
+		a.serverPanelMap = make(map[string]string)
+	}
 	for _, s := range servers {
 		a.serverPanelMap[s.ID] = currentPanel
 	}
+	a.fileMu.Unlock()
 
 	result := make([]map[string]interface{}, len(servers))
 	for i, s := range servers {
@@ -297,13 +317,15 @@ func (a *App) SwitchServer(serverID string) error {
 		runtime.EventsEmit(a.ctx, "console-connected", false)
 	}
 
-	// Check if we're switching to a server on a different panel
-	if panelName, ok := a.serverPanelMap[serverID]; ok {
-		if panelName != a.config.GetActivePanelName() {
-			// Server is on a different panel, switch to that panel first
-			if err := a.SwitchPanel(panelName); err != nil {
-				return fmt.Errorf("failed to switch to panel %s: %v", panelName, err)
-			}
+	// Check if we're switching to a server on a different panel. Read under
+	// the lock: RefreshAllServerMappings replaces this map wholesale.
+	a.fileMu.Lock()
+	panelName, ok := a.serverPanelMap[serverID]
+	a.fileMu.Unlock()
+	if ok && panelName != a.config.GetActivePanelName() {
+		// Server is on a different panel, switch to that panel first
+		if err := a.SwitchPanel(panelName); err != nil {
+			return fmt.Errorf("failed to switch to panel %s: %v", panelName, err)
 		}
 	}
 
