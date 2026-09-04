@@ -194,6 +194,12 @@
         });
 
         bar.innerHTML = html;
+
+        // Scrolled to the end, not the start. A workspace is narrow and a real
+        // path does not fit: left-aligned, the folder you are actually in ends
+        // up off the right edge and all that is visible is "container / plug…".
+        // The tail is the part that matters; the ancestors are one scroll away.
+        bar.scrollLeft = bar.scrollWidth;
     }
 
     /**
@@ -316,7 +322,7 @@
             const isDir = !!f.isDir;
             const when = window.app ? window.app.formatWhen(f.modTime) : '';
             const whenFull = window.app ? window.app.formatWhenFull(f.modTime) : '';
-            html += '<div class="file-item" draggable="' + (isDir ? 'false' : 'true') + '" ' +
+            html += '<div class="file-item" draggable="true" ' +
                 'data-name="' + esc(f.name) + '" data-dir="' + (isDir ? '1' : '') + '">' +
                 '<span class="file-icon kind-' + window.Icons.kindFor(f.name, isDir) + '">' +
                 window.Icons.forFile(f.name, isDir) + '</span>' +
@@ -695,7 +701,8 @@
     function wireDragAndDrop(root) {
         root.addEventListener('dragstart', (e) => {
             const row = e.target.closest('.ws-list .file-item');
-            if (!row || row.dataset.dir || row.dataset.updir) return;
+            // Folders too: only the way out is not draggable.
+            if (!row || row.dataset.updir || !row.dataset.name) return;
 
             const side = row.closest('.ws').getAttribute('data-side');
             const st = space(side);
@@ -703,7 +710,8 @@
                 side: side,
                 serverID: st.serverID,
                 path: st.path === '/' ? '/' + row.dataset.name : st.path + '/' + row.dataset.name,
-                name: row.dataset.name
+                name: row.dataset.name,
+                isDir: !!row.dataset.dir
             };
             e.dataTransfer.effectAllowed = 'copy';
             e.dataTransfer.setData('text/plain', dragging.path);
@@ -748,6 +756,8 @@
             const target = space(side);
             const from = dragging;
             dragging = null;
+
+            if (from.isDir) return dropFolder(from, target, side);
 
             const busy = window.UX.toast.show('Copying ' + from.name + '…', { duration: 60000 });
             try {
@@ -811,6 +821,76 @@
 
         setServer('left', id, name, panel);
         return true;
+    }
+
+    /**
+     * A folder dropped on the other workspace.
+     *
+     * Every file in it is read from one server and written to the other, so a
+     * big one is somebody's bandwidth twice over — it is measured first and
+     * asked about before anything moves. Nothing is overwritten silently:
+     * names that already exist come back as conflicts and are left alone
+     * unless the replacement is agreed to, and anything replaced goes to the
+     * recycle bin the way an upload's would.
+     */
+    async function dropFolder(from, target, side, overwrite, accept) {
+        const busy = window.UX.toast.show(
+            'Copying ' + from.name + '…', { duration: 600000 });
+
+        let res;
+        try {
+            res = await go().CopyFolderBetweenServers(
+                from.serverID, from.path, target.serverID, target.path,
+                !!overwrite, !!accept);
+        } catch (err) {
+            busy.dismiss();
+            window.UX.toast.bad('Copy failed: ' + err);
+            return;
+        }
+        busy.dismiss();
+
+        if (res.needs_confirm) {
+            const ok = await window.Shell.dialog.confirm('Copy this folder?',
+                '<b>' + esc(from.name) + '</b> is ' + esc(res.summary) + '.<br><br>' +
+                'Every file is read from one server and written to the other, so this ' +
+                'takes a while and uses the connection both ways.',
+                { html: true, confirmLabel: 'Copy it' });
+            if (!ok) return;
+            return dropFolder(from, target, side, overwrite, true);
+        }
+
+        await browse(side);
+
+        if (res.conflicts.length && !overwrite) {
+            const ok = await window.Shell.dialog.confirm(
+                res.conflicts.length + ' already there',
+                'These are already in the destination and were left alone:' +
+                '<pre class="mono" style="max-height:220px;overflow:auto;font-size:11.5px;' +
+                'white-space:pre-wrap">' + esc(res.conflicts.join('\n')) + '</pre>' +
+                'Replacing them keeps a copy of each in the recycle bin first.',
+                { html: true, danger: true, confirmLabel: 'Replace them' });
+            if (ok) return dropFolder(from, target, side, true, true);
+        }
+
+        const parts = [res.copied + ' file(s) copied'];
+        if (res.skipped.length) parts.push(res.skipped.length + ' skipped');
+        if (res.failed.length) parts.push(res.failed.length + ' failed');
+        if (res.truncated) parts.push('stopped at the limit');
+
+        const summary = from.name + ': ' + parts.join(', ');
+        if (res.failed.length) {
+            window.UX.toast.warn(summary, {
+                action: {
+                    label: 'Show',
+                    run: () => window.Shell.dialog.confirm('These did not copy',
+                        '<pre class="mono" style="max-height:280px;overflow:auto;font-size:11.5px;' +
+                        'white-space:pre-wrap">' + esc(res.failed.concat(res.skipped).join('\n')) +
+                        '</pre>', { html: true, confirmLabel: 'OK' })
+                }
+            });
+        } else {
+            window.UX.toast.ok(summary);
+        }
     }
 
     /* -------------------------------------------------------------- toggle */

@@ -2482,7 +2482,14 @@ body.console-window .logo-sub::after { content: " · console"; }
 .ws-path.path-bar::-webkit-scrollbar { display: none; }
 
 .ws-path .crumb-panel {
+    /* Not shrinkable: as a flex item that could shrink, an overflowing bar
+       squashed it to a 12px stub. It keeps its width and scrolls off to the
+       left with the rest of the ancestors instead. */
     flex: none;
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     margin-right: 5px;
     padding: 1px 6px;
     border-radius: var(--radius-pill);
@@ -2490,6 +2497,10 @@ body.console-window .logo-sub::after { content: " · console"; }
     color: var(--text-dim);
     font-size: 10.5px;
 }
+
+/* The current folder is the one that has to stay legible, so it never
+   shrinks; the ancestors scroll away to its left. */
+.ws-path .crumb.current { position: sticky; right: 0; background: var(--bg-secondary); }
 
 .ws-path .crumb {
     flex: none;

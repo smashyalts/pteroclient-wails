@@ -2480,6 +2480,167 @@ func (a *App) CopyFileBetweenServers(srcServer, srcPath, dstServer, dstDir strin
 	return out, nil
 }
 
+/* ------------------------------------------------- copying a whole folder */
+
+// FolderCopy reports what a folder-to-folder copy did.
+type FolderCopy struct {
+	Copied    int      `json:"copied"`
+	Bytes     int64    `json:"bytes"`
+	Skipped   []string `json:"skipped"`
+	Failed    []string `json:"failed"`
+	Conflicts []string `json:"conflicts"`
+	Truncated bool     `json:"truncated"`
+	// NeedsConfirm and Summary work the way the drag archive's do: something
+	// large is measured and handed back rather than started.
+	NeedsConfirm bool   `json:"needs_confirm"`
+	Files        int    `json:"files"`
+	Summary      string `json:"summary"`
+}
+
+// Bounds for one folder copy. Every file is a download and an upload, so this
+// is somebody's bandwidth twice over.
+const (
+	folderCopyMaxFiles = 2000
+	folderCopyAskBytes = 128 << 20 // 128 MB
+	folderCopyAskFiles = 500
+)
+
+// CopyFolderBetweenServers copies a folder and everything under it.
+//
+// File by file rather than as an archive: an archive would be faster but it
+// would also mean creating one on the source, downloading it, uploading it, and
+// extracting it on the destination — four ways for a failure to leave rubbish
+// on somebody's server, against one here.
+//
+// Nothing is overwritten without being asked. A name that already exists on the
+// far side is reported and left alone unless overwrite is set, and a file that
+// is replaced goes to the recycle bin first, exactly as an upload does.
+func (a *App) CopyFolderBetweenServers(srcServer, srcPath, dstServer, dstDir string, overwrite, accept bool) (*FolderCopy, error) {
+	cleanSrc, err := normalizeRemotePath(srcPath)
+	if err != nil {
+		return nil, err
+	}
+	_, folderName, err := splitRemote(cleanSrc)
+	if err != nil {
+		return nil, err
+	}
+	cleanDst, err := normalizeRemotePath(dstDir)
+	if err != nil {
+		return nil, err
+	}
+	if srcServer == dstServer && strings.HasPrefix(cleanDst+"/", cleanSrc+"/") {
+		return nil, errors.New("that would copy a folder into itself")
+	}
+
+	out := &FolderCopy{Skipped: []string{}, Failed: []string{}, Conflicts: []string{}}
+
+	// What is being asked for, before anything moves.
+	type item struct {
+		rel  string
+		full string
+		size int64
+	}
+	var files []item
+
+	a.fileMu.Lock()
+	err = a.withServerClient(srcServer, func(c *pterodactyl.Client, _ string) error {
+		queue := []string{cleanSrc}
+		for len(queue) > 0 {
+			if len(files) >= folderCopyMaxFiles {
+				out.Truncated = true
+				break
+			}
+			dir := queue[0]
+			queue = queue[1:]
+
+			listing, listErr := c.ListFiles(dir)
+			if listErr != nil {
+				out.Failed = append(out.Failed, dir+" — "+listErr.Error())
+				continue
+			}
+			for i := range listing {
+				f := listing[i]
+				full := joinRemote(dir, f.Name)
+				if f.IsSymlink {
+					out.Skipped = append(out.Skipped, full+" — a symlink")
+					continue
+				}
+				if !f.IsFile {
+					queue = append(queue, full)
+					continue
+				}
+				if f.Size > safestore.MaxSingleCapture {
+					out.Skipped = append(out.Skipped,
+						full+" — "+humanBytes(f.Size)+", too large to copy through the app")
+					continue
+				}
+				files = append(files, item{
+					rel:  strings.TrimPrefix(full, cleanSrc+"/"),
+					full: full,
+					size: f.Size,
+				})
+			}
+		}
+		return nil
+	})
+	a.fileMu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+
+	var total int64
+	for _, f := range files {
+		total += f.size
+	}
+
+	if !accept && (out.Truncated || total >= folderCopyAskBytes || len(files) >= folderCopyAskFiles) {
+		out.NeedsConfirm = true
+		out.Files = len(files)
+		out.Summary = fmt.Sprintf("%s across %d file(s)%s", humanBytes(total), len(files),
+			map[bool]string{true: " so far", false: ""}[out.Truncated])
+		return out, nil
+	}
+
+	if len(files) == 0 {
+		return out, nil
+	}
+
+	// One file at a time: read from the source, write to the destination.
+	// Doing this under one lock for the whole copy would freeze every other
+	// operation for as long as it runs.
+	for _, f := range files {
+		target := joinRemote(cleanDst, folderName)
+		if f.rel != "" && f.rel != f.full {
+			if dir := path.Dir(f.rel); dir != "." && dir != "/" {
+				target = joinRemote(target, dir)
+			}
+		}
+
+		res, copyErr := a.CopyFileBetweenServers(srcServer, f.full, dstServer, target, overwrite)
+		if copyErr != nil {
+			out.Failed = append(out.Failed, f.full+" — "+copyErr.Error())
+			continue
+		}
+		if res.Conflict {
+			out.Conflicts = append(out.Conflicts, res.Path)
+			continue
+		}
+		out.Copied++
+		out.Bytes += res.Size
+
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "folder-copy-progress", map[string]interface{}{
+				"done":  out.Copied,
+				"total": len(files),
+				"bytes": out.Bytes,
+				"path":  res.Path,
+			})
+		}
+	}
+
+	return out, nil
+}
+
 /* ------------------------------------------------- download to the disk */
 
 // DownloadOutcome reports where files ended up on this machine.
