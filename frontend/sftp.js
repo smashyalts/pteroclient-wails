@@ -206,7 +206,11 @@
         const rate = out.seconds > 0.2
             ? ' at ' + bytes(Math.round(out.bytes / out.seconds)) + '/s'
             : '';
-        const headline = out.moved + ' file(s) ' + (kind === 'upload' ? 'uploaded' : 'downloaded') +
+        // "over SFTP" said plainly: the same buttons do the same job over the
+        // panel API when there is no connection, and the two are very
+        // different speeds — so which one just ran is worth knowing.
+        const headline = out.moved + ' file(s) ' +
+            (kind === 'upload' ? 'uploaded' : 'downloaded') + ' over SFTP' +
             ' · ' + bytes(out.bytes) + rate;
 
         if (out.cancelled) {
@@ -241,7 +245,8 @@
         if (!bar) return;
         bar.hidden = false;
         bar.dataset.kind = kind;
-        $('sftpBarLabel').textContent = kind === 'upload' ? 'Uploading…' : 'Downloading…';
+        $('sftpBarLabel').textContent =
+            (kind === 'upload' ? 'Uploading' : 'Downloading') + ' over SFTP…';
         $('sftpBarFill').style.width = '0%';
         $('sftpBarDetail').textContent = '';
     }
@@ -260,9 +265,11 @@
             : (p.total > 0 ? (p.done / p.total) * 100 : 0);
         $('sftpBarFill').style.width = pct.toFixed(1) + '%';
 
+        const streams = window.SFTP && window.SFTP.status().streams;
         $('sftpBarLabel').textContent =
             (bar.dataset.kind === 'upload' ? 'Uploading' : 'Downloading') +
-            ' ' + p.done + ' of ' + p.total;
+            ' ' + p.done + ' of ' + p.total + ' over SFTP' +
+            (streams ? ' · ' + streams + ' at a time' : '');
         $('sftpBarDetail').textContent =
             bytes(p.bytes) + ' of ' + bytes(p.total_bytes) +
             (p.current ? ' · ' + p.current : '');

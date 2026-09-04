@@ -1765,12 +1765,30 @@ type DragArchive struct {
 	Path     string `json:"path"`
 	Bytes    int64  `json:"bytes"`
 	Archived bool   `json:"archived"`
+
+	// Set instead of URL when the selection is big enough to be worth asking
+	// about. The window shows what it found and calls again with accept set.
+	NeedsConfirm bool   `json:"needs_confirm"`
+	Measured     int64  `json:"measured"`
+	Files        int    `json:"files"`
+	Partial      bool   `json:"partial"`
+	Summary      string `json:"summary"`
 }
+
+// What counts as big enough to ask about. A plugins folder is well under
+// both; a world is well over.
+const (
+	dragPackAskBytes = 256 << 20 // 256 MB
+	dragPackAskFiles = 3000
+	// The walk stops here. Past it the answer is "large" either way, and
+	// counting the rest is a thousand more requests to say so.
+	dragPackScanMax = 6000
+)
 
 // PrepareDragArchive makes one downloadable thing out of a selection so it can
 // be dragged out of the window. A single file needs no archive and is handed
 // back as itself; anything else is archived on the panel.
-func (a *App) PrepareDragArchive(paths []string) (*DragArchive, error) {
+func (a *App) PrepareDragArchive(paths []string, accept bool) (*DragArchive, error) {
 	if len(paths) == 0 {
 		return nil, errors.New("nothing selected")
 	}
@@ -1850,6 +1868,45 @@ func (a *App) PrepareDragArchive(paths []string) (*DragArchive, error) {
 			return nil
 		}
 
+		// Archiving is the panel's CPU and disk, and a world folder is a
+		// lot of both. Anything sizeable is measured first and handed back
+		// for the user to agree to, rather than started because a folder was
+		// dragged half an inch.
+		if !accept {
+			var bytes int64
+			var files int
+			partial := false
+
+			for _, item := range cleaned {
+				found := present[path.Base(item)]
+				if found == nil {
+					continue
+				}
+				if found.IsFile {
+					bytes += found.Size
+					files++
+					continue
+				}
+				subBytes, subFiles, subPartial := a.measureTree(c, item, 1, &files)
+				bytes += subBytes
+				files = subFiles
+				if subPartial {
+					partial = true
+				}
+			}
+
+			if partial || bytes >= dragPackAskBytes || files >= dragPackAskFiles {
+				out.NeedsConfirm = true
+				out.Measured = bytes
+				out.Files = files
+				out.Partial = partial
+				out.Summary = fmt.Sprintf("%s across %d file(s)%s",
+					humanBytes(bytes), files,
+					map[bool]string{true: " so far", false: ""}[partial])
+				return nil
+			}
+		}
+
 		attrs, compressErr := c.CompressFiles(root, names)
 		if compressErr != nil {
 			return fmt.Errorf("could not archive the selection: %w", compressErr)
@@ -1894,6 +1951,48 @@ func (a *App) PrepareDragArchive(paths []string) (*DragArchive, error) {
 		return nil, err
 	}
 	return out, nil
+}
+
+// measureTree adds up what is under a folder, giving up once it has seen
+// enough to know the answer is "a lot".
+//
+// Bounded on purpose: this runs while somebody is holding a mouse button down,
+// and a full walk of a world would be thousands of requests before the drag
+// could even start.
+func (a *App) measureTree(c *pterodactyl.Client, dir string, depth int, files *int) (int64, int, bool) {
+	if depth > maxPlanDepth || *files >= dragPackScanMax {
+		return 0, *files, true
+	}
+
+	items, err := c.ListFiles(dir)
+	if err != nil {
+		// Unreadable is not measurable; treat it as a reason to ask.
+		return 0, *files, true
+	}
+
+	var bytes int64
+	partial := false
+
+	for i := range items {
+		if *files >= dragPackScanMax {
+			return bytes, *files, true
+		}
+		f := items[i]
+		if f.IsSymlink {
+			continue
+		}
+		if f.IsFile {
+			bytes += f.Size
+			*files++
+			continue
+		}
+		sub, _, subPartial := a.measureTree(c, joinRemote(dir, f.Name), depth+1, files)
+		bytes += sub
+		if subPartial {
+			partial = true
+		}
+	}
+	return bytes, *files, partial
 }
 
 // trackDragArchive records an archive so it gets swept, and sweeps the oldest

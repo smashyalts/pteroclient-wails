@@ -2612,7 +2612,7 @@ function initApp() {
             this.prepareDragArchive(key, paths);
         },
 
-        async prepareDragArchive(key, paths) {
+        async prepareDragArchive(key, paths, accept) {
             if (!this.dragArchives) this.dragArchives = new Map();
             if (this.dragPending === key) return;
             this.dragPending = key;
@@ -2622,7 +2622,23 @@ function initApp() {
                 { duration: 600000 });
 
             try {
-                const made = await window.go.main.App.PrepareDragArchive(paths);
+                const made = await window.go.main.App.PrepareDragArchive(paths, !!accept);
+
+                // Big enough to be worth asking about. Archiving is the
+                // panel's CPU and disk, and a world folder dragged half an inch
+                // by accident is not something to start quietly.
+                if (made && made.needs_confirm) {
+                    busy.dismiss();
+                    this.dragPending = null;
+                    const ok = await window.Shell.dialog.confirm('Pack this for the drag?',
+                        'That is <b>' + this.escapeHtml(made.summary) + '</b>' +
+                        (made.partial ? ' — it was still counting when it stopped' : '') +
+                        '.<br><br>Packing it happens on the server, and something this size ' +
+                        'takes a while and works the disk while it runs.',
+                        { html: true, confirmLabel: 'Pack it' });
+                    if (!ok) return;
+                    return this.prepareDragArchive(key, paths, true);
+                }
                 busy.dismiss();
                 this.dragArchives.set(key, made);
                 // The signed URL is short lived and the archive is swept off
