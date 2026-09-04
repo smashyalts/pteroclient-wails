@@ -19,7 +19,6 @@ import (
 	"path"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
@@ -437,15 +436,21 @@ func TestCancelStops(t *testing.T) {
 		jobs = append(jobs, Job{Local: p, Remote: srv.at(fmt.Sprintf("cancel/c%02d.bin", i)), Size: info.Size()})
 	}
 
+	// Cancelled before it starts, not on a timer. Over loopback the whole
+	// batch now finishes in well under the time any sleep could catch — the
+	// timing version passed only because the transfer used to be slower, which
+	// is a test measuring the wrong thing.
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(40 * time.Millisecond)
-		cancel()
-	}()
+	cancel()
 
 	result := session.Upload(ctx, jobs, nil)
 	if !result.Cancelled {
 		t.Error("a cancelled transfer did not report itself as cancelled")
+	}
+	for _, f := range result.Files {
+		if f.Error == "" && f.Bytes > 0 {
+			t.Errorf("%s moved despite the transfer being cancelled first", f.Job.Remote)
+		}
 	}
 	moved := 0
 	for _, f := range result.Files {
