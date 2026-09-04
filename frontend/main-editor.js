@@ -2243,19 +2243,35 @@ function initApp() {
         async deletePaths(paths) {
             if (!paths || !paths.length) return;
 
-            // Planning walks the tree — one request per folder — so on a
-            // plugins directory this takes seconds. Without this, pressing
-            // Delete looked like nothing had happened.
-            const planning = window.UX.toast.show(
-                'Checking what would go from ' + paths.length + ' item(s)…', { duration: 120000 });
+            // The dialog goes up now and fills itself in. Planning walks the
+            // tree — one request per folder — so on a plugins directory it
+            // takes seconds, and waiting for that before showing anything made
+            // pressing Delete look like nothing had happened.
+            const answer = window.Shell.dialog.open({
+                title: 'Delete ' + paths.length + ' item(s)',
+                body: '<div class="loading">' +
+                    (window.Icons ? window.Icons.svg('refresh', 'spin') : '') +
+                    '<div>Working out what would go…</div></div>',
+                confirmLabel: 'Delete',
+                danger: true,
+                busy: true
+            });
 
             let plan;
             try {
                 plan = await window.go.main.App.PlanDelete('', paths);
-                planning.dismiss();
             } catch (err) {
-                planning.dismiss();
+                window.Shell.dialog.close(null);
+                await answer;
                 await this.say('Cannot delete', String(err));
+                return;
+            }
+
+            // It may have been dismissed while the plan was being worked out.
+            // Filling in a dialog that is gone would leave this waiting on a
+            // confirmation nobody can give.
+            if (!document.getElementById('appDialog').classList.contains('show')) {
+                await answer;
                 return;
             }
 
@@ -2276,31 +2292,38 @@ function initApp() {
             const strict = style !== 'double' &&
                 ((plan.critical && plan.critical.length > 0) || !plan.recoverable);
 
+            const noWayBack = (plan.critical && plan.critical.length > 0) || !plan.recoverable;
+
             if (strict) {
-                const v = await window.Shell.dialog.form('Delete ' + plan.roots.length + ' item(s)', [
-                    { name: 'confirm', label: 'Type DELETE to confirm', placeholder: 'DELETE', mono: true }
-                ], { confirmLabel: 'Delete', danger: true, intro: intro });
-                if (!v) return;
-                if (String(v.confirm || '').trim().toUpperCase() !== 'DELETE') {
+                window.Shell.dialog.update({
+                    title: 'Delete ' + plan.roots.length + ' item(s)',
+                    body: intro +
+                        '<div class="form-group" style="margin-top:14px">' +
+                        '<label>Type DELETE to confirm</label>' +
+                        '<input type="text" class="mono" data-field="confirm" placeholder="DELETE">' +
+                        '</div>',
+                    confirmTwice: '',
+                    busy: false
+                });
+                if (!await answer) return;
+                if (String(window.Shell.dialog.field('confirm') || '').trim().toUpperCase() !== 'DELETE') {
                     await this.say('Nothing deleted', 'The confirmation did not match, so nothing was removed.');
                     return;
                 }
             } else {
                 // Two clicks rather than a typed word: enough that a stray
                 // click cannot delete anything, without the ceremony.
-                const noWayBack = (plan.critical && plan.critical.length > 0) || !plan.recoverable;
-                const ok = await window.Shell.dialog.open({
+                window.Shell.dialog.update({
                     title: 'Delete ' + plan.roots.length + ' item(s)',
                     body: intro,
-                    confirmLabel: 'Delete',
                     // The second click says which case this is, since the only
                     // difference between them is whether it can be undone.
                     confirmTwice: noWayBack
                         ? 'Click again — this cannot be undone'
                         : 'Click again to delete',
-                    danger: true
+                    busy: false
                 });
-                if (!ok) return;
+                if (!await answer) return;
             }
 
             const deleting = window.UX.toast.show(

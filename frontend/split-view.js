@@ -1099,6 +1099,41 @@
         goTo: (path) => browse(focused, path),
         useServer: (id, name, panel) => setServer(focused, id, name, panel),
 
+        /* ------------------------------------------------------------
+         * The verbs the command layer needs.
+         *
+         * One name each, matching what the main editor does, so a hotkey can
+         * be routed to whichever workspace is in front instead of being turned
+         * off when the split is open.
+         * --------------------------------------------------------------- */
+
+        refresh: () => browse(focused),
+
+        hasOpenFile: () => !!space(focused).activeTab,
+
+        closeTab: () => {
+            const st = space(focused);
+            if (st.activeTab) closeTab(focused, st.activeTab);
+        },
+
+        // The workspace's own layout, which is what Ctrl+Shift+B means here:
+        // the main window's dock cycle has no meaning inside one.
+        cycleLayout: () => {
+            const st = space(focused);
+            st.layout = st.layout === 'side' ? 'stacked' : 'side';
+            applyLayout();
+            saveLayout();
+            window.UX.toast.show(
+                'Explorer ' + (st.layout === 'stacked' ? 'below' : 'beside') + ' the editor',
+                { duration: 1200 });
+        },
+
+        navUp: () => {
+            const st = space(focused);
+            if (!st.path || st.path === '/') return;
+            browse(focused, st.path.replace(/\/[^/]+\/?$/, '') || '/');
+        },
+
         // Ctrl+Tab, on the workspace being worked in.
         cycleTab: (delta) => {
             const st = space(focused);

@@ -94,12 +94,53 @@
             else delete confirmBtn.dataset.twice;
             modal.classList.add('show');
 
+            confirmBtn.disabled = !!opts.busy;
+
             const first = modal.querySelector('.modal-body input, .modal-body textarea');
             if (first) setTimeout(() => first.focus(), 20);
 
             return new Promise((resolve) => {
                 Dialog._resolve = resolve;
             });
+        },
+
+        /**
+         * Change a dialog that is already on screen.
+         *
+         * For work that has to be shown before it is finished: the dialog goes
+         * up straight away saying what it is doing, and fills itself in when
+         * the answer arrives. Waiting for the answer first made pressing Delete
+         * look like nothing had happened.
+         */
+        update(opts) {
+            const modal = $('appDialog');
+            if (!modal || !modal.classList.contains('show')) return;
+
+            if (opts.title !== undefined) $('appDialogTitle').textContent = opts.title;
+            if (opts.body !== undefined) $('appDialogBody').innerHTML = opts.body;
+
+            const confirmBtn = modal.querySelector('[data-dialog-confirm]');
+            if (opts.confirmLabel !== undefined) confirmBtn.textContent = opts.confirmLabel;
+            if (opts.danger !== undefined) confirmBtn.className = opts.danger ? 'danger' : 'primary';
+            if (opts.busy !== undefined) confirmBtn.disabled = !!opts.busy;
+
+            if (opts.confirmTwice !== undefined) {
+                if (Dialog._disarm) { clearTimeout(Dialog._disarm); Dialog._disarm = null; }
+                delete confirmBtn.dataset.armed;
+                delete confirmBtn.dataset.was;
+                if (opts.confirmTwice) confirmBtn.dataset.twice = opts.confirmTwice;
+                else delete confirmBtn.dataset.twice;
+            }
+
+            const first = modal.querySelector('.modal-body input, .modal-body textarea');
+            if (first) setTimeout(() => first.focus(), 20);
+        },
+
+        /** Reads a field out of whatever is on screen, for an updated dialog. */
+        field(name) {
+            const el = document.querySelector('#appDialogBody [data-field="' + name + '"]');
+            if (!el) return '';
+            return el.type === 'checkbox' ? el.checked : el.value;
         },
 
         close(value) {

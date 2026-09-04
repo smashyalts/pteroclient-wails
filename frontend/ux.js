@@ -407,6 +407,44 @@
         return items;
     }
 
+    /**
+     * Does this row match what was typed, and how well?
+     *
+     * A plain substring test meant "waffle survival" found nothing on a server
+     * called "[WaffleSMP] Survival" — the words are there but not adjacent, and
+     * nobody types the brackets. Every whitespace-separated word has to appear
+     * somewhere in the row, in any order.
+     *
+     * Returns a score so better matches sort first, or -1 for no match:
+     *   - a word starting a word in the row beats one buried mid-word
+     *   - matches early in the row beat matches late in it
+     *   - a shorter row beats a longer one that happens to contain the same
+     *     words, so "plugins" ranks above "plugins/Essentials/config"
+     */
+    function scoreMatch(haystack, words) {
+        if (!words.length) return 0;
+
+        const lower = haystack.toLowerCase();
+        let score = 0;
+
+        for (const word of words) {
+            const at = lower.indexOf(word);
+            if (at === -1) return -1;
+
+            // Starting a word is what somebody typing an abbreviation means.
+            const before = at === 0 ? '' : lower.charAt(at - 1);
+            if (at === 0) score += 40;
+            else if (/[^a-z0-9]/.test(before)) score += 25;
+
+            // Earlier is better, but only mildly.
+            score += Math.max(0, 12 - Math.floor(at / 4));
+        }
+
+        // Prefer the shorter of two rows that both matched.
+        score += Math.max(0, 30 - Math.floor(lower.length / 3));
+        return score;
+    }
+
     function paletteBuild(query) {
         const list = $('paletteList');
         if (!list) return;
@@ -425,12 +463,24 @@
             ? window.Folders.resolve(q, target ? target.currentPath : '/')
             : null;
 
-        const needle = q.toLowerCase();
-        paletteItems = paletteSources().filter((item) => {
-            if (only && item.kind !== only) return false;
-            if (!needle) return true;
-            return (item.label + ' ' + item.hint).toLowerCase().indexOf(needle) !== -1;
+        // Words, not one run of characters: "waffle survival" should find
+        // "[WaffleSMP] Survival".
+        const words = q.toLowerCase().split(/\s+/).filter(Boolean);
+        const scored = [];
+        paletteSources().forEach((item) => {
+            if (only && item.kind !== only) return;
+            if (!words.length) {
+                scored.push({ item: item, score: 0 });
+                return;
+            }
+            const score = scoreMatch(item.label + ' ' + item.hint, words);
+            if (score >= 0) scored.push({ item: item, score: score });
         });
+
+        // Stable within a score, so the source order still decides ties —
+        // servers before folders before commands.
+        scored.sort((a, b) => b.score - a.score);
+        paletteItems = scored.map((s) => s.item);
 
         if (typedPath && target) {
             // First, and only once: a path already in the list is the same
@@ -480,6 +530,26 @@
         paletteRender();
     }
 
+    /**
+     * Tab: the highlighted row, in the box.
+     *
+     * For a folder that means the path, with a trailing slash so the next
+     * keystroke carries on down the tree rather than replacing it. For anything
+     * else it is the label, which is at least a starting point.
+     */
+    function paletteComplete() {
+        const item = paletteItems[paletteIndex];
+        const input = $('paletteInput');
+        if (!item || !input) return;
+
+        let text = item.kind === 'folder' ? item.label : item.label;
+        if (item.kind === 'folder' && text.charAt(text.length - 1) !== '/') text += '/';
+
+        input.value = text;
+        input.setSelectionRange(text.length, text.length);
+        paletteBuild(text);
+    }
+
     function paletteRun() {
         const item = paletteItems[paletteIndex];
         if (!item) return;
@@ -498,6 +568,14 @@
             else if (e.key === 'ArrowUp') { e.preventDefault(); paletteMove(-1); }
             else if (e.key === 'Enter') { e.preventDefault(); paletteRun(); }
             else if (e.key === 'Escape') { e.preventDefault(); paletteClose(); }
+            else if (e.key === 'Tab') {
+                // Tab completes rather than jumping focus out of the box: put
+                // the highlighted row into the input so it can be edited or
+                // gone deeper into, which is what a path list wants. Enter
+                // still goes straight there.
+                e.preventDefault();
+                paletteComplete();
+            }
         });
 
         $('paletteList').addEventListener('click', (e) => {

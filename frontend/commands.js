@@ -42,6 +42,18 @@
         if (a && a.cycleEditorTab) a.cycleEditorTab(delta);
     }
 
+    /**
+     * The workspace a command is about.
+     *
+     * With the split open that is the one being worked in; without it, the
+     * main window's. Returning null means "the main editor", so a command that
+     * has no split equivalent still works as it always did.
+     */
+    function ws() {
+        const split = window.SplitView;
+        return (split && split.isActive()) ? split : null;
+    }
+
     function register() {
         const R = window.UX.registerCommand;
 
@@ -113,6 +125,7 @@
             label: 'Up one folder',
             when: onFiles,
             run: () => {
+                if (ws()) return ws().navUp();
                 const parts = String(app().currentPath || '/').split('/').filter(Boolean);
                 parts.pop();
                 app().loadFiles(parts.length ? '/' + parts.join('/') : '/');
@@ -154,7 +167,7 @@
             id: 'files.refresh', group: 'Files', key: 'F5',
             label: 'Refresh the file list',
             when: onFiles,
-            run: () => app().refreshFiles()
+            run: () => (ws() ? ws().refresh() : app().refreshFiles())
         });
 
         R({
@@ -215,28 +228,31 @@
 
         /* --------------------------------------------------------- editing */
 
+        // These three used to be switched off whenever the split was open —
+        // `!inSplit()` — so Ctrl+W closed nothing and Ctrl+S saved nothing.
+        // They go to whichever workspace is in front now.
         R({
             id: 'file.save', group: 'Editor', key: 'Ctrl+S',
             label: 'Save',
             allowInField: true,
-            when: () => hasOpenFile() && !inSplit(),
-            run: () => app().saveFile()
+            when: () => (ws() ? ws().hasOpenFile() : hasOpenFile()),
+            run: () => (ws() ? ws().save() : app().saveFile())
         });
 
         R({
             id: 'file.saveAll', group: 'Editor', key: 'Ctrl+Shift+S',
             label: 'Save every open file',
             allowInField: true,
-            when: () => !!(app() && app().openFiles.size) && !inSplit(),
-            run: () => app().saveAllFiles()
+            when: () => (ws() ? ws().hasOpenFile() : !!(app() && app().openFiles.size)),
+            run: () => (ws() ? ws().saveAll() : app().saveAllFiles())
         });
 
         R({
             id: 'file.close', group: 'Editor', key: 'Ctrl+W',
             label: 'Close the open file',
             allowInField: true,
-            when: () => hasOpenFile() && !inSplit(),
-            run: () => app().closeFile()
+            when: () => (ws() ? ws().hasOpenFile() : hasOpenFile()),
+            run: () => (ws() ? ws().closeTab() : app().closeFile())
         });
 
         R({
@@ -267,7 +283,9 @@
             id: 'view.dock', group: 'View', key: 'Ctrl+Shift+B',
             label: 'Move the file tree (left / right / bottom / hidden)',
             when: onFiles,
-            run: () => app().cycleTreeDock()
+            // Inside a split the main window's dock has no meaning; the
+            // equivalent is where the explorer sits within the workspace.
+            run: () => (ws() ? ws().cycleLayout() : app().cycleTreeDock())
         });
 
         R({
