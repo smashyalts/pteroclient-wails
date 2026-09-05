@@ -12,7 +12,24 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/options/windows"
 )
 
-//go:embed all:frontend
+// What the window actually loads, rather than the whole frontend directory.
+//
+// `all:frontend` swept in frontend/node_modules whenever it happened to be on
+// disk — and `wails build` puts it there itself, by running npm install when
+// package.json changes. That is 19 MB of dev dependencies, esbuild's own
+// executable among them, baked into a binary that is shipped to people. The
+// difference showed up as a release asset that was 31 MB one time and 14 MB
+// the next, for the same code.
+//
+// index.html loads ./*.js and ./src/style.css and nothing else local, so this
+// is the whole of what is served. Anything new that the window fetches has to
+// be added here, which is the cost of not shipping a build tool inside the
+// app.
+//
+//go:embed frontend/index.html
+//go:embed frontend/*.js
+//go:embed all:frontend/src
+//go:embed all:frontend/wailsjs
 var assets embed.FS
 
 // Wails v2 runs one window per process, so a console in its own OS window —
