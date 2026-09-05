@@ -20,6 +20,11 @@
 
     const $ = (id) => document.getElementById(id);
     const go = () => (window.go && window.go.main && window.go.main.App) || null;
+
+    // Rows a workspace's filter tests against, with their names already
+    // lowercased. Rebuilt when the folder is, not on every keystroke.
+    const filterRows = new WeakMap();
+    let renderGeneration = 0;
     const esc = (v) => window.Shell.fmt.escapeHtml(v);
     const icon = (n, c) => window.Icons.svg(n, c);
     const SIDES = ['left', 'right'];
@@ -110,7 +115,7 @@
             '    <div class="ws-explorer">' +
             '      <div class="ws-path path-bar" data-role="path"></div>' +
             '      <div class="filter-bar sm"><input type="text" data-role="filter" autocomplete="off" ' +
-            '        spellcheck="false" placeholder="Filter…"></div>' +
+            '        spellcheck="false" placeholder="Filter… or *.yml"></div>' +
             '      <div class="ws-list" data-role="list"></div>' +
             '    </div>' +
             '    <div class="ws-grip" data-innergrip="' + side + '"></div>' +
@@ -351,6 +356,8 @@
         });
 
         list.innerHTML = html || '<div class="preview-empty">Empty folder</div>';
+        // Tells the filter its cached row list is stale.
+        list.dataset.generation = String(++renderGeneration);
 
         // Browsing elsewhere clears the box, or the new folder comes up
         // looking empty because of a word typed in the old one.
@@ -359,22 +366,40 @@
         applyFilter(side, '');
     }
 
-    /** Hides rows in one workspace that do not match. `..` always stays. */
+    /**
+     * Hides rows in one workspace that do not match. `..` always stays.
+     *
+     * The same query rules as the main explorer and the recursive search:
+     * plain text, a glob, or re: for a pattern.
+     */
     function applyFilter(side, query) {
-        const needle = String(query || '').trim().toLowerCase();
         const list = el(side, '[data-role="list"]');
         if (!list) return;
 
+        const match = window.UX.matcher(query);
+        // Cached with the list rather than rebuilt per keystroke: the rows
+        // only change when the folder does.
+        let rows = filterRows.get(list);
+        if (!rows || rows.generation !== list.dataset.generation) {
+            rows = { generation: list.dataset.generation, items: [] };
+            list.querySelectorAll('.file-item').forEach((row) => {
+                if (row.dataset.updir) return;
+                const name = String(row.dataset.name || '');
+                rows.items.push({ el: row, name: name, lower: name.toLowerCase() });
+            });
+            filterRows.set(list, rows);
+        }
+
         let shown = 0;
-        list.querySelectorAll('.file-item').forEach((row) => {
-            if (row.dataset.updir) return;
-            const hit = !needle || String(row.dataset.name || '').toLowerCase().indexOf(needle) !== -1;
-            row.hidden = !hit;
+        for (let i = 0; i < rows.items.length; i++) {
+            const row = rows.items[i];
+            const hit = !match || match.test(row.name, row.lower);
+            if (row.el.hidden === hit) row.el.hidden = !hit;
             if (hit) shown++;
-        });
+        }
 
         let none = list.querySelector('.ws-filter-empty');
-        if (needle && shown === 0) {
+        if (match && shown === 0) {
             if (!none) {
                 none = document.createElement('div');
                 none.className = 'preview-empty ws-filter-empty';

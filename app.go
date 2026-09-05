@@ -49,6 +49,12 @@ type App struct {
 	// a binding call may be reading it.
 	consoleMu sync.Mutex
 
+	// Held for the whole of ConnectConsole. The window asks to connect from
+	// more than one place — on `connected`, on `server-changed`, from the
+	// retry timer — and two of those interleaving used to leave two sockets
+	// alive, both emitting every line.
+	consoleDial sync.Mutex
+
 	// One search at a time. Starting another cancels the one running, whose
 	// workers would otherwise go on listing folders for a window that has
 	// moved on.
@@ -349,11 +355,11 @@ func (a *App) SwitchServer(serverID string) error {
 		return fmt.Errorf("not connected")
 	}
 
-	// Disconnect console if connected
-	if a.consoleWS != nil && a.consoleWS.IsConnected() {
-		a.consoleWS.Close()
-		runtime.EventsEmit(a.ctx, "console-connected", false)
-	}
+	// Whatever console is open belongs to the server being left. Through
+	// DisconnectConsole rather than a bare Close: that one also clears the
+	// field, so a connect that follows is not comparing itself against a
+	// socket that is already dead.
+	_ = a.DisconnectConsole()
 
 	// Check if we're switching to a server on a different panel. Read under
 	// the lock: RefreshAllServerMappings replaces this map wholesale.
@@ -535,13 +541,8 @@ func (a *App) SwitchPanel(panelName string) error {
 		runtime.LogInfo(a.ctx, fmt.Sprintf("[SWITCH_PANEL] Switching from %s to %s", a.config.GetActivePanelName(), panelName))
 	}
 
-	// Disconnect console if connected
-	if a.consoleWS != nil && a.consoleWS.IsConnected() {
-		a.consoleWS.Close()
-		if a.ctx != nil {
-			runtime.EventsEmit(a.ctx, "console-connected", false)
-		}
-	}
+	// Same as the server switch: the open console is the old panel's.
+	_ = a.DisconnectConsole()
 
 	a.invalidateClients()
 
@@ -737,18 +738,81 @@ func (a *App) SetPowerState(signal string) error {
 
 // SendCommand sends a console command
 func (a *App) SendCommand(command string) error {
-	if a.consoleWS == nil || !a.consoleWS.IsConnected() {
+	socket := a.currentConsole()
+	if socket == nil || !socket.IsConnected() {
 		return fmt.Errorf("console not connected")
 	}
 
-	return a.consoleWS.SendCommand(command)
+	return socket.SendCommand(command)
 }
 
-// ConnectConsole connects to console WebSocket
+/* --------------------------------------------------------- console socket */
+
+// currentConsole is the socket the app is using, if any.
+func (a *App) currentConsole() *pterodactyl.ConsoleWebSocket {
+	a.consoleMu.Lock()
+	defer a.consoleMu.Unlock()
+	return a.consoleWS
+}
+
+// consoleIsCurrent reports whether this socket is still the one in use.
+//
+// Every callback asks first. A socket that has been replaced goes on running
+// until its read loop notices the close, and in that window it must not be
+// heard from: its output is the duplicate line, and its close is a
+// disconnection the user never had — which the window answered by reconnecting,
+// making yet another socket.
+func (a *App) consoleIsCurrent(socket *pterodactyl.ConsoleWebSocket) bool {
+	a.consoleMu.Lock()
+	defer a.consoleMu.Unlock()
+	return a.consoleWS == socket
+}
+
+// takeConsole makes next the socket in use and hands back the one it replaced,
+// which is the caller's to close.
+//
+// Assignment used to be a bare `a.consoleWS = ...`, which dropped the previous
+// socket on the floor still connected and still emitting. Returning it makes
+// closing it the obvious next line rather than something to remember.
+func (a *App) takeConsole(next *pterodactyl.ConsoleWebSocket) *pterodactyl.ConsoleWebSocket {
+	a.consoleMu.Lock()
+	defer a.consoleMu.Unlock()
+	previous := a.consoleWS
+	a.consoleWS = next
+	return previous
+}
+
+// dropConsole clears the socket if it is still the one in use, and says whether
+// it was. One lock rather than a check and then a clear, so two goroutines
+// finishing at once cannot both believe they were the live one.
+func (a *App) dropConsole(socket *pterodactyl.ConsoleWebSocket) bool {
+	a.consoleMu.Lock()
+	defer a.consoleMu.Unlock()
+	if a.consoleWS != socket {
+		return false
+	}
+	a.consoleWS = nil
+	return true
+}
+
+// ConnectConsole opens the console websocket, replacing whatever was open.
+//
+// There is exactly one socket. This used to assign the new one over the old —
+// `a.consoleWS = NewConsoleWebSocket...` — which left the old one connected,
+// its read loop running and its OnOutput closure still emitting. Every extra
+// connect therefore added a permanent second copy of every console line, and
+// the window asks to connect from three places: when the app connects, when
+// the server changes, and from the reconnect timer. Typing one command got
+// two and three answers back.
 func (a *App) ConnectConsole() error {
 	if a.client == nil {
 		return fmt.Errorf("not connected to server")
 	}
+
+	// One at a time, for the whole of it — including the credential fetch and
+	// the handshake, which is where two calls used to overlap.
+	a.consoleDial.Lock()
+	defer a.consoleDial.Unlock()
 
 	// Get WebSocket credentials
 	creds, err := a.client.GetWebSocketCredentials()
@@ -760,24 +824,32 @@ func (a *App) ConnectConsole() error {
 	cfg := a.config.GetConfig()
 	panelOrigin := strings.TrimSuffix(cfg.PanelURL, "/")
 
-	a.consoleWS = pterodactyl.NewConsoleWebSocketWithOrigin(
+	socket := pterodactyl.NewConsoleWebSocketWithOrigin(
 		creds.Socket, creds.Token, cfg.ServerID, panelOrigin,
 	)
 
-	// Set up message handler
-	a.consoleWS.OnOutput = func(message string) {
+	// Every callback checks that this socket is still the one in use. Closing
+	// the old one below is not enough on its own: its read loop may already be
+	// inside a callback, and it goes on running until it notices.
+	socket.OnOutput = func(message string) {
+		if !a.consoleIsCurrent(socket) {
+			return
+		}
 		// Send raw ANSI text; frontend will render colors
 		runtime.EventsEmit(a.ctx, "console-output", message)
 	}
 
-	a.consoleWS.OnError = func(err error) {
+	socket.OnError = func(err error) {
+		if !a.consoleIsCurrent(socket) {
+			return
+		}
 		runtime.EventsEmit(a.ctx, "console-error", err.Error())
 	}
 
 	// The token the panel issues lasts about ten minutes. It warns a minute
 	// before the end, and this hands back a fresh one so the socket is
 	// re-authenticated in place rather than dropped.
-	a.consoleWS.RefreshToken = func() (string, error) {
+	socket.RefreshToken = func() (string, error) {
 		if a.client == nil {
 			return "", fmt.Errorf("not connected")
 		}
@@ -788,30 +860,33 @@ func (a *App) ConnectConsole() error {
 		return fresh.Token, nil
 	}
 
-	// However the socket ends, the UI hears about it. Without this the button
-	// went on saying Disconnect over a console that had already expired.
-	socket := a.consoleWS
-	a.consoleWS.OnClose = func() {
+	// However the socket ends, the UI hears about it — but only for the socket
+	// in use. A replaced one closing is not a disconnection the user had, and
+	// reporting it as one made the window start reconnecting, which made
+	// another socket, which is how one duplicate became three.
+	socket.OnClose = func() {
+		if !a.dropConsole(socket) {
+			return
+		}
 		if a.ctx != nil {
 			runtime.EventsEmit(a.ctx, "console-connected", false)
 		}
-		// Only for the socket this closure belongs to: a later connection has
-		// its own, and must not be reported as dead by an older one.
-		a.consoleMu.Lock()
-		if a.consoleWS == socket {
-			a.consoleWS = nil
-		}
-		a.consoleMu.Unlock()
 	}
 
-	// Connect
-	err = a.consoleWS.Connect()
-	if err != nil {
+	// In place before the handshake, so a line arriving early is not dropped
+	// for belonging to a socket the app does not yet call its own.
+	if previous := a.takeConsole(socket); previous != nil {
+		_ = previous.Close()
+	}
+
+	if err := socket.Connect(); err != nil {
+		// Not the live socket any more: it never became one.
+		a.dropConsole(socket)
 		return fmt.Errorf("failed to connect: %v", err)
 	}
 
 	// Request initial logs
-	if err := a.consoleWS.RequestLogs(); err != nil {
+	if err := socket.RequestLogs(); err != nil {
 		runtime.EventsEmit(a.ctx, "console-error", "failed to request logs: "+err.Error())
 	}
 
@@ -819,22 +894,23 @@ func (a *App) ConnectConsole() error {
 	return nil
 }
 
-// DisconnectConsole disconnects console
+// DisconnectConsole closes the console socket, if there is one.
+//
+// The event goes out either way. A deliberate close does not raise one of its
+// own any more — OnClose stays quiet for a socket that is no longer in use,
+// and by the time it fires this one is not — so saying it here is what keeps
+// the button honest.
 func (a *App) DisconnectConsole() error {
-	a.consoleMu.Lock()
-	socket := a.consoleWS
-	a.consoleWS = nil
-	a.consoleMu.Unlock()
+	socket := a.takeConsole(nil)
 
+	var err error
 	if socket != nil {
-		return socket.Close()
+		err = socket.Close()
 	}
-	// Nothing open, but the UI may still think there is — say so plainly
-	// rather than leaving it showing a button that does nothing.
 	if a.ctx != nil {
 		runtime.EventsEmit(a.ctx, "console-connected", false)
 	}
-	return nil
+	return err
 }
 
 // ConsoleConnected reports whether the console socket is actually live, for a

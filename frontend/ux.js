@@ -747,8 +747,64 @@
         // is measured in zoomed ones. Anything placing an element at a pointer
         // has to divide by this.
         scale: () => ZOOM_STEPS[zoomIndex],
+        matcher: matcher,
         refreshBindings: loadBindings
     };
+
+    /**
+     * How a typed query is turned into a test, for the filter box and the
+     * recursive search alike.
+     *
+     * Three ways of asking, picked from the query itself:
+     *
+     *   config     any name containing it, either case
+     *   *.yml      a glob over the whole name
+     *   re:^a.*z$  a regular expression
+     *
+     * The same three the Go side understands, deliberately: the filter box and
+     * the search behind Enter are one box, and a rule that held in one and not
+     * the other would hide a file and then find it.
+     *
+     * Returns null for an empty query — everything matches — or an object with
+     * `test(name, lower)`, where `lower` is the name already lowercased. The
+     * caller keeps that around: lowercasing every row on every keystroke is
+     * the whole cost of filtering a big folder.
+     */
+    function matcher(query) {
+        const trimmed = String(query || '').trim();
+        if (!trimmed) return null;
+
+        if (/^re:/i.test(trimmed)) {
+            const body = trimmed.slice(3).trim();
+            if (!body) return null;
+            try {
+                const re = new RegExp(body, 'i');
+                return { test: (name) => re.test(name) };
+            } catch (err) {
+                // Half-typed patterns are the normal state of a box being
+                // typed into, so this is not an error to shout about.
+                return { broken: true, test: () => true };
+            }
+        }
+
+        if (/[*?]/.test(trimmed)) {
+            let source = '';
+            for (const ch of trimmed) {
+                if (ch === '*') source += '.*';
+                else if (ch === '?') source += '.';
+                else source += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            }
+            try {
+                const re = new RegExp('^' + source + '$', 'i');
+                return { test: (name) => re.test(name) };
+            } catch (err) {
+                return { broken: true, test: () => true };
+            }
+        }
+
+        const needle = trimmed.toLowerCase();
+        return { test: (name, lower) => (lower || name.toLowerCase()).indexOf(needle) !== -1 };
+    }
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', boot);

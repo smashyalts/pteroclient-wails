@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -122,6 +123,35 @@ type ServerInfo struct {
 func NewClient(baseURL, apiKey, serverID string) *Client {
 	client := resty.New()
 	client.SetTimeout(30 * time.Second)
+
+	// A rate-limited request is waited out rather than failed.
+	//
+	// The panel limits the client API per key, and a recursive search asks it
+	// for a folder listing sixteen at a time — so 429 is a normal thing to
+	// meet, not an error. Dropping it meant a search quietly missing whole
+	// folders. Only 429 is retried: the request was refused rather than
+	// carried out, so repeating it cannot write anything twice.
+	client.SetRetryCount(3)
+	client.SetRetryWaitTime(400 * time.Millisecond)
+	client.SetRetryMaxWaitTime(4 * time.Second)
+	client.AddRetryCondition(func(r *resty.Response, err error) bool {
+		return r != nil && r.StatusCode() == http.StatusTooManyRequests
+	})
+	// The panel says when it will accept another request. Guessing longer
+	// wastes the wait; guessing shorter spends the retry on another refusal.
+	client.SetRetryAfter(func(_ *resty.Client, r *resty.Response) (time.Duration, error) {
+		if r == nil {
+			return 0, nil
+		}
+		seconds, err := strconv.Atoi(strings.TrimSpace(r.Header().Get("Retry-After")))
+		if err != nil || seconds < 0 {
+			return 0, nil // no header, or not a number: resty's own backoff
+		}
+		if seconds > 10 {
+			seconds = 10 // a search is not worth a minute of waiting
+		}
+		return time.Duration(seconds) * time.Second, nil
+	})
 	client.SetHeader("Authorization", "Bearer "+apiKey)
 	client.SetHeader("Accept", "application/json")
 	client.SetHeader("Content-Type", "application/json")

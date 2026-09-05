@@ -403,8 +403,12 @@ function initApp() {
                 this.loadNearest(wasAt);
                 // SwitchServer drops the old console; bring the new one up
                 // rather than making the Connect button a required step.
-                this.consoleConnected = false;
-                this.ensureConsole();
+                //
+                // Whether one is up is the Go side's answer, not a flag set
+                // here. Forcing it false asked for a second connection over a
+                // socket that was already the new server's — two sockets, two
+                // copies of every line.
+                this.refreshConsoleState().then(() => this.ensureConsole());
             });
             
             window.runtime.EventsOn('panel-changed', (panelName) => {
@@ -774,19 +778,24 @@ function initApp() {
          * or filtering to nothing would trap you in the folder.
          */
         applyFilter() {
-            const query = String(this.filterQuery || '').trim().toLowerCase();
+            const query = String(this.filterQuery || '').trim();
             const countEl = document.getElementById('fileFilterCount');
             const clearEl = document.getElementById('fileFilterClear');
 
+            // Over the rows the render already built, not a fresh DOM query
+            // with a textContent read and a toLowerCase per row per keystroke.
+            // The parent row is not among them, so the way out always stays.
+            const match = window.UX.matcher(query);
+
             let shown = 0;
-            document.querySelectorAll('#fileTree .file-item').forEach((row) => {
-                const name = row.querySelector('.file-name');
-                const label = name ? name.textContent : '';
-                if (label === '..') return;                 // the way out stays
-                const hit = !query || label.toLowerCase().indexOf(query) !== -1;
-                row.hidden = !hit;
+            for (let i = 0; i < this.renderedRows.length; i++) {
+                const row = this.renderedRows[i];
+                const hit = !match || match.test(row.name, row.lower);
+                // Only when it changes: assigning hidden is a style
+                // invalidation whether or not the value is different.
+                if (row.el.hidden === hit) row.el.hidden = !hit;
                 if (hit) shown++;
-            });
+            }
 
             const total = this.renderedRows.length;
             if (countEl) {
@@ -929,7 +938,10 @@ function initApp() {
 
             const warn = document.getElementById('searchWarn');
             if (warn) {
-                warn.hidden = !state.truncated;
+                // Whenever there is something to say, not only when the walk
+                // was cut short: a search that skipped folders it could not
+                // read has a hole in it and has to admit to it.
+                warn.hidden = !state.reason;
                 warn.textContent = state.reason || '';
             }
 
@@ -1055,7 +1067,13 @@ function initApp() {
             } else {
                 div.setAttribute('draggable', 'true');
                 div.dataset.index = String(this.renderedRows.length);
-                this.renderedRows.push({ path: fullPath, entry: entry, el: div, file: file });
+                // The lowercase name is kept with the row. Filtering used to
+                // build it again for every row on every keystroke, which for a
+                // folder of a few thousand is the whole cost of typing.
+                this.renderedRows.push({
+                    path: fullPath, entry: entry, el: div, file: file,
+                    name: file.name, lower: String(file.name || '').toLowerCase()
+                });
             }
 
             return div;
@@ -3091,10 +3109,25 @@ function initApp() {
             else btn.textContent = 'Connect';
         },
 
+        // What the Go side says about the console, rather than what this
+        // window last remembered. The two drift whenever a socket is replaced.
+        async refreshConsoleState() {
+            try {
+                this.consoleConnected = await window.go.main.App.ConsoleConnected();
+            } catch (err) {
+                this.consoleConnected = false;
+            }
+            this.paintConnectButton();
+            return this.consoleConnected;
+        },
+
         // Connect if not already. connectConsole() toggles, so auto-connecting
         // through it would disconnect a console that was already up.
         async ensureConsole() {
             if (this.consoleConnected || this.consoleConnecting) return;
+            // A retry that is already booked would open a second socket a
+            // moment after this one. This connect is that retry.
+            this.cancelConsoleRetry();
             this.consoleConnecting = true;
             this.consoleWanted = true;
             this.consoleRetries = 0;
