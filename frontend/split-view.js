@@ -216,37 +216,55 @@
         menu.className = 'context-menu show ws-menu';
         menu.id = 'wsContextMenu';
 
-        const items = [];
-        if (!entry.isDir) {
-            items.push(['open', 'Open']);
-        } else {
-            items.push(['open', 'Open folder']);
-        }
-        items.push(['copy', 'Copy path']);
-        items.push(['refresh', 'Refresh']);
+        // menu-item, not context-item: the latter matches nothing in the
+        // stylesheet, so these rows had no padding, no hover and no pointer —
+        // three lines of bare text in a box.
+        const other = side === 'left' ? 'right' : 'left';
+        const items = [
+            ['open', entry.isDir ? 'Open folder' : 'Open'],
+            ['across', 'Copy to the ' + other + ' side', !space(other).serverID],
+            [null],
+            ['copy', 'Copy path'],
+            ['refresh', 'Refresh']
+        ];
 
         menu.innerHTML = items.map(function (item) {
-            return '<div class="context-item" data-act="' + item[0] + '">' + esc(item[1]) + '</div>';
+            if (!item[0]) return '<div class="separator"></div>';
+            return '<div class="menu-item' + (item[2] ? ' disabled' : '') +
+                '" data-act="' + item[0] + '">' + esc(item[1]) + '</div>';
         }).join('');
 
         document.body.appendChild(menu);
 
-        // Placed so it opens inwards rather than off the edge.
+        // The body carries a CSS zoom, so the pointer's clientX/clientY are
+        // unzoomed viewport pixels while left/top inside the body are
+        // multiplied by that zoom again. Without this the menu opened away
+        // from the cursor at any scale but 100%, which is what made it look
+        // like it belonged to nothing.
+        const scale = (window.UX && window.UX.scale && window.UX.scale()) || 1;
         const box = menu.getBoundingClientRect();
-        const x = Math.min(event.clientX, window.innerWidth - box.width - 8);
-        const y = Math.min(event.clientY, window.innerHeight - box.height - 8);
+        const limitX = window.innerWidth / scale;
+        const limitY = window.innerHeight / scale;
+        let x = event.clientX / scale;
+        let y = event.clientY / scale;
+        // Opens inwards rather than off the edge.
+        if (x + box.width / scale > limitX) x = limitX - box.width / scale - 4;
+        if (y + box.height / scale > limitY) y = limitY - box.height / scale - 4;
         menu.style.left = Math.max(4, x) + 'px';
         menu.style.top = Math.max(4, y) + 'px';
 
         menu.addEventListener('click', async (e) => {
-            const act = e.target.closest('.context-item');
-            if (!act) return;
+            const act = e.target.closest('.menu-item');
+            if (!act || act.classList.contains('disabled')) return;
             closeMenu();
 
             switch (act.dataset.act) {
                 case 'open':
                     if (entry.isDir) browse(side, entry.path);
                     else openFile(side, entry.name);
+                    break;
+                case 'across':
+                    copyAcross(side, entry);
                     break;
                 case 'copy':
                     try {
@@ -758,31 +776,72 @@
             dragging = null;
 
             if (from.isDir) return dropFolder(from, target, side);
-
-            const busy = window.UX.toast.show('Copying ' + from.name + '…', { duration: 60000 });
-            try {
-                let res = await go().CopyFileBetweenServers(
-                    from.serverID, from.path, target.serverID, target.path, false);
-
-                if (res.conflict) {
-                    busy.dismiss();
-                    const ok = await window.Shell.dialog.confirm('Replace ' + esc(from.name) + '?',
-                        esc(res.reason) + '.<br><br>The file being replaced goes to the recycle bin first.',
-                        { danger: true, confirmLabel: 'Replace' });
-                    if (!ok) return;
-                    res = await go().CopyFileBetweenServers(
-                        from.serverID, from.path, target.serverID, target.path, true);
-                } else {
-                    busy.dismiss();
-                }
-
-                await browse(side);
-                window.UX.toast.ok((res.replaced ? 'Replaced ' : 'Copied ') + from.name + ' → ' + res.path);
-            } catch (err) {
-                busy.dismiss();
-                window.UX.toast.bad('Copy failed: ' + err);
-            }
+            return dropFile(from, target, side);
         });
+    }
+
+    /**
+     * One file landing on the other workspace.
+     *
+     * Its own function because a drag is not the only way to ask for this: the
+     * right-click menu sends the same thing down the same path, so the two
+     * cannot drift apart.
+     */
+    async function dropFile(from, target, side) {
+        const busy = window.UX.toast.show('Copying ' + from.name + '…', { duration: 60000 });
+        try {
+            let res = await go().CopyFileBetweenServers(
+                from.serverID, from.path, target.serverID, target.path, false);
+
+            if (res.conflict) {
+                busy.dismiss();
+                // What the destination server's bin setting actually is,
+                // rather than the sentence that used to be printed either way.
+                const bin = await binState(target.serverID);
+                const ok = await window.Shell.dialog.confirm('Replace ' + esc(from.name) + '?',
+                    esc(res.reason) + '.<br><br>' + (bin.enabled
+                        ? 'The file being replaced goes to the recycle bin first.'
+                        : '<span style="color:var(--danger-text)"><b>The recycle bin is off for that ' +
+                          'server.</b> What this replaces cannot be brought back.</span>'),
+                    { danger: true, confirmLabel: 'Replace' });
+                if (!ok) return;
+                res = await go().CopyFileBetweenServers(
+                    from.serverID, from.path, target.serverID, target.path, true);
+            } else {
+                busy.dismiss();
+            }
+
+            await browse(side);
+            window.UX.toast.ok((res.replaced ? 'Replaced ' : 'Copied ') + from.name + ' → ' + res.path);
+        } catch (err) {
+            busy.dismiss();
+            window.UX.toast.bad('Copy failed: ' + err);
+        }
+    }
+
+    /**
+     * Send an entry to the other workspace without dragging it.
+     *
+     * Same two calls the drop makes, so the conflict question, the recycle-bin
+     * wording and the size check are all the ones already tested.
+     */
+    async function copyAcross(fromSide, entry) {
+        const otherSide = fromSide === 'left' ? 'right' : 'left';
+        const target = space(otherSide);
+        if (!target.serverID) {
+            window.UX.toast.warn('Pick a server in the other pane first');
+            return;
+        }
+
+        const from = {
+            side: fromSide,
+            serverID: space(fromSide).serverID,
+            path: entry.path,
+            name: entry.name,
+            isDir: entry.isDir
+        };
+        if (from.isDir) return dropFolder(from, target, otherSide);
+        return dropFile(from, target, otherSide);
     }
 
     /**
@@ -862,12 +921,16 @@
         await browse(side);
 
         if (res.conflicts.length && !overwrite) {
+            const bin = await binState(target.serverID);
             const ok = await window.Shell.dialog.confirm(
                 res.conflicts.length + ' already there',
                 'These are already in the destination and were left alone:' +
                 '<pre class="mono" style="max-height:220px;overflow:auto;font-size:11.5px;' +
                 'white-space:pre-wrap">' + esc(res.conflicts.join('\n')) + '</pre>' +
-                'Replacing them keeps a copy of each in the recycle bin first.',
+                (bin.enabled
+                    ? 'Replacing them keeps a copy of each in the recycle bin first.'
+                    : '<span style="color:var(--danger-text)"><b>The recycle bin is off for that ' +
+                      'server.</b> Whatever they replace is gone.</span>'),
                 { html: true, danger: true, confirmLabel: 'Replace them' });
             if (ok) return dropFolder(from, target, side, true, true);
         }
@@ -890,6 +953,15 @@
             });
         } else {
             window.UX.toast.ok(summary);
+        }
+    }
+
+    /** Whether replacing something on that server keeps a copy first. */
+    async function binState(serverID) {
+        try {
+            return await go().BinAvailable(serverID || '');
+        } catch (err) {
+            return { enabled: false, reason: String(err) };
         }
     }
 

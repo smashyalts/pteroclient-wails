@@ -296,6 +296,9 @@ func (a *App) SFTPUpload(localPaths []string, remoteDir string, overwrite, keepC
 	if err != nil {
 		return nil, err
 	}
+	// Same rule as the API upload: this server's recycle-bin setting decides,
+	// not the checkbox the window sent.
+	keepCopy = keepCopy && a.binOnFor(serverID)
 	if len(localPaths) == 0 {
 		return nil, errors.New("nothing selected")
 	}

@@ -1554,6 +1554,41 @@ func (a *App) EmptyRecycleBin() error {
 	return a.store.Empty(safestore.KindBin)
 }
 
+// BinState is what a window needs before offering to keep a copy of
+// something it is about to replace.
+type BinState struct {
+	Enabled bool `json:"enabled"`
+	// Reason is why not, so the dialog can say which of the two it is rather
+	// than guessing.
+	Reason string `json:"reason,omitempty"`
+}
+
+// BinAvailable reports whether replacing something on this server would keep a
+// copy of what it replaced. An empty serverID means the active one.
+//
+// Config and the store's own state only — nothing goes out over the network —
+// so a dialog can ask this every time it is about to offer the choice instead
+// of caching an answer the Vault tab may since have changed.
+func (a *App) BinAvailable(serverID string) BinState {
+	if a.store == nil {
+		return BinState{Reason: "the local store is unavailable"}
+	}
+	id := serverIDOrActive(a, serverID)
+	if id == "" || !a.config.RecycleBinEnabled(id) {
+		return BinState{Reason: "the recycle bin is off for this server"}
+	}
+	return BinState{Enabled: true}
+}
+
+// binOnFor is BinAvailable for the code paths that only need the yes or no.
+//
+// Every replacement asks this rather than trusting the flag the window sent:
+// turning the bin off for a server and then having uploads file copies into it
+// anyway would mean the setting did not do what it says.
+func (a *App) binOnFor(serverID string) bool {
+	return a.BinAvailable(serverID).Enabled
+}
+
 // BinPolicy is one server's recycle-bin setting, for the Vault's list.
 type BinPolicy struct {
 	ServerID string `json:"server_id"`
@@ -2359,6 +2394,10 @@ type CopyResult struct {
 	Replaced bool   `json:"replaced"`
 	Conflict bool   `json:"conflict"`
 	Reason   string `json:"reason,omitempty"`
+	// NoCopyKept is set when something was replaced with the destination's
+	// recycle bin switched off, so the window can say so rather than claim a
+	// copy it does not have.
+	NoCopyKept bool `json:"no_copy_kept"`
 }
 
 // CopyFileBetweenServers copies one file from any server to any other,
@@ -2455,9 +2494,15 @@ func (a *App) CopyFileBetweenServers(srcServer, srcPath, dstServer, dstDir strin
 				out.Reason = name + " is already in " + cleanDstDir
 				return nil
 			}
-			if _, captureErr := a.captureRemote(safestore.KindBin, c, panel, serverIDOr(dstServer, c),
-				dstPath, "replaced by a copy", files[i].Size); captureErr != nil {
-				return fmt.Errorf("refusing to copy: keeping a copy of the file it would replace failed: %w", captureErr)
+			// The destination server's policy, not the source's: the file
+			// at risk is the one being written over.
+			if a.binOnFor(serverIDOr(dstServer, c)) {
+				if _, captureErr := a.captureRemote(safestore.KindBin, c, panel, serverIDOr(dstServer, c),
+					dstPath, "replaced by a copy", files[i].Size); captureErr != nil {
+					return fmt.Errorf("refusing to copy: keeping a copy of the file it would replace failed: %w", captureErr)
+				}
+			} else {
+				out.NoCopyKept = true
 			}
 			out.Replaced = true
 			break
@@ -3429,6 +3474,11 @@ func (a *App) UploadBatch(baseDir string, items []UploadItem, overwrite, keepCop
 			_ = c.CreateDirectory(parent, name)
 		}
 
+		// The server's own recycle-bin setting has the last word over the
+		// checkbox the window sent: with the bin off for this server nothing
+		// is filed into it, and the dialog says so instead of offering.
+		keepHere := keepCopy && a.binOnFor(c.GetServerID())
+
 		// One listing per directory, reused for every file going into it.
 		existing := map[string]map[string]pterodactyl.FileInfo{}
 		listOf := func(dir string) map[string]pterodactyl.FileInfo {
@@ -3458,7 +3508,7 @@ func (a *App) UploadBatch(baseDir string, items []UploadItem, overwrite, keepCop
 					out.Failed = append(out.Failed, item.path+" — a folder is already there")
 					continue
 				}
-				if keepCopy {
+				if keepHere {
 					copyEntry, captureErr := a.captureRemote(safestore.KindBin, c, panel, c.GetServerID(),
 						item.path, "replaced by an upload", found.Size)
 					if captureErr != nil {

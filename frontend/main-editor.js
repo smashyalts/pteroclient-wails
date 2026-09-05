@@ -1999,6 +1999,22 @@ function initApp() {
         },
 
         /**
+         * Whether replacing something on this server keeps a copy first.
+         *
+         * Asked at the moment it matters rather than cached: the setting lives
+         * in the Vault tab and can be turned off between one upload and the
+         * next. Treated as off if the question itself fails — the safe answer
+         * to "can this be undone?" is no.
+         */
+        async binState() {
+            try {
+                return await window.go.main.App.BinAvailable('');
+            } catch (err) {
+                return { enabled: false, reason: String(err) };
+            }
+        },
+
+        /**
          * Uploads a walked drop into the current folder.
          *
          * One batched call rather than one per file: the backend creates the
@@ -2049,21 +2065,33 @@ function initApp() {
             failed.push(...(result.failed || []));
 
             if (result.conflicts && result.conflicts.length) {
+                // With the recycle bin off for this server there is nothing to
+                // keep a copy in, so offering the choice would be offering
+                // something the app cannot do. It says that instead, and the
+                // dialog is one click.
+                const bin = await this.binState();
+
+                const list = '<p class="form-hint" style="margin-bottom:12px">' +
+                    result.conflicts.slice(0, 8).map(c => '<span class="mono">' + this.escapeHtml(c) + '</span>').join('<br>') +
+                    (result.conflicts.length > 8 ? '<br>…and ' + (result.conflicts.length - 8) + ' more' : '') +
+                    '</p>';
+
                 const answer = await window.Shell.dialog.form(
                     result.conflicts.length + ' already there',
-                    [{
+                    bin.enabled ? [{
                         name: 'keep', type: 'checkbox', value: true,
                         label: 'Keep a copy of what I am replacing',
                         hint: 'Each copy is a full download of the old file before the new one goes up. ' +
                               'Turning this off is noticeably faster and makes the replacements unrecoverable.'
-                    }],
+                    }] : [],
                     {
                         confirmLabel: 'Replace them',
                         danger: true,
-                        intro: '<p class="form-hint" style="margin-bottom:12px">' +
-                            result.conflicts.slice(0, 8).map(c => '<span class="mono">' + this.escapeHtml(c) + '</span>').join('<br>') +
-                            (result.conflicts.length > 8 ? '<br>…and ' + (result.conflicts.length - 8) + ' more' : '') +
-                            '</p>'
+                        intro: list + (bin.enabled ? '' :
+                            '<p class="form-hint" style="margin-bottom:12px;color:var(--danger-text)">' +
+                            '<b>The recycle bin is off for this server.</b> Nothing is copied first, so ' +
+                            'what these replace cannot be brought back. Turn it on in ' +
+                            'Vault \u2192 Recycle bin per server.</p>')
                     });
 
                 if (answer) {
@@ -2076,7 +2104,8 @@ function initApp() {
                     const again = items.filter(i => wanted.has(base + '/' + i.rel_path));
                     const retry = window.UX.toast.show('Replacing ' + again.length + ' file(s)…', { duration: 600000 });
                     try {
-                        const second = await window.go.main.App.UploadBatch(this.currentPath, again, true, !!answer.keep);
+                        const second = await window.go.main.App.UploadBatch(
+                            this.currentPath, again, true, !!(bin.enabled && answer.keep));
                         done += second.replaced.length + second.uploaded.length;
                         failed.push(...(second.failed || []));
                     } catch (err) {
@@ -2326,8 +2355,11 @@ function initApp() {
                 if (!await answer) return;
             }
 
+            // Says what is happening, not what usually happens: with the bin
+            // off for this server nothing is copied anywhere.
             const deleting = window.UX.toast.show(
-                'Copying to the recycle bin and deleting…', { duration: 600000 });
+                plan.bin_enabled === false ? 'Deleting…' : 'Copying to the recycle bin and deleting…',
+                { duration: 600000 });
             try {
                 const outcome = await window.go.main.App.SafeDeleteFiles(plan.token);
                 deleting.dismiss();

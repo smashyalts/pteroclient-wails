@@ -104,6 +104,20 @@
         }
     }
 
+    /**
+     * Whether replacing something on this server keeps a copy first.
+     *
+     * Off is the answer if the question fails: claiming a safety net that may
+     * not be there is the one wrong way round to be.
+     */
+    async function binState(serverID) {
+        try {
+            return await go().BinAvailable(serverID || '');
+        } catch (err) {
+            return { enabled: false, reason: String(err) };
+        }
+    }
+
     async function disconnect() {
         const api = go();
         if (!api) return;
@@ -127,19 +141,30 @@
 
         // The same question the API upload asks, for the same reason: a
         // replacement without a copy first is the one thing with no way back.
-        const answers = await window.Shell.dialog.form('Upload over SFTP', [
-            { name: 'keep', label: 'Keep a copy of anything replaced', type: 'checkbox', value: true },
-            { name: 'over', label: 'Replace files that already exist', type: 'checkbox', value: false }
-        ], {
+        // Where this server has no recycle bin the question has one answer, so
+        // it is stated rather than asked.
+        const bin = await binState(status.server_id);
+
+        const fields = [];
+        if (bin.enabled) {
+            fields.push({ name: 'keep', label: 'Keep a copy of anything replaced', type: 'checkbox', value: true });
+        }
+        fields.push({ name: 'over', label: 'Replace files that already exist', type: 'checkbox', value: false });
+
+        const answers = await window.Shell.dialog.form('Upload over SFTP', fields, {
             confirmLabel: 'Upload',
             intro: '<div class="list-sub">' + localPaths.length +
                 ' item(s) into <span class="mono">' + esc(remoteDir) + '</span>. ' +
-                'Folders are sent whole.</div>',
+                'Folders are sent whole.</div>' +
+                (bin.enabled ? '' :
+                    '<div class="list-sub" style="color:var(--danger-text);margin-top:6px">' +
+                    '<b>The recycle bin is off for this server.</b> Anything replaced is gone.</div>'),
             html: true
         });
         if (!answers) return null;
 
-        return run('upload', () => go().SFTPUpload(localPaths, remoteDir, !!answers.over, !!answers.keep));
+        return run('upload', () => go().SFTPUpload(
+            localPaths, remoteDir, !!answers.over, !!(bin.enabled && answers.keep)));
     }
 
     async function download(remotePaths) {

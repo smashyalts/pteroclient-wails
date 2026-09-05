@@ -1,9 +1,13 @@
 package main
 
 import (
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
+
+	"pteroclient-wails/pkg/config"
+	"pteroclient-wails/pkg/safestore"
 )
 
 // Anything the UI hands to a write or a delete goes through these two
@@ -317,5 +321,60 @@ func TestOwnerRootPrefersTheDeepestMatch(t *testing.T) {
 	}
 	if got := ownerRoot(roots, "/a/other.txt"); got != "/a" {
 		t.Errorf("ownerRoot returned %q, want /a", got)
+	}
+}
+
+// A replacement is only kept where that server's recycle bin is on.
+//
+// The checkbox in the window is a request, not the decision. A window that was
+// open when the setting changed, a second window, or a call made straight
+// across the bridge all have to land on the same answer, so every path that
+// takes a copy asks this rather than trusting what it was handed.
+//
+// HOME is pointed at a temporary directory first: the config manager writes to
+// ~/.pteroclient, and a test must not touch the real one.
+func TestBinAvailableFollowsTheServerPolicy(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+
+	cfg, err := config.NewMultiConfigManager()
+	if err != nil {
+		t.Fatalf("config: %v", err)
+	}
+	store, err := safestore.New(filepath.Join(dir, "store"))
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+
+	app := &App{config: cfg, store: store}
+
+	// Nobody has said otherwise, so the bin is on.
+	if !app.BinAvailable("srv-1").Enabled {
+		t.Error("a server with no setting should follow the default, which is on")
+	}
+
+	if err := cfg.SetRecycleBinEnabled("srv-1", false); err != nil {
+		t.Fatalf("set policy: %v", err)
+	}
+	state := app.BinAvailable("srv-1")
+	if state.Enabled {
+		t.Error("the bin is off for srv-1; BinAvailable said it was on")
+	}
+	if state.Reason == "" {
+		t.Error("a disabled bin has to say why, so the dialog can print it")
+	}
+	if app.binOnFor("srv-1") {
+		t.Error("binOnFor disagreed with BinAvailable")
+	}
+	// One server's setting is not every server's.
+	if !app.binOnFor("srv-2") {
+		t.Error("turning the bin off for one server turned it off for another")
+	}
+
+	// No store at all is the same answer, for a different reason: there is
+	// nowhere to put a copy.
+	if (&App{config: cfg}).BinAvailable("srv-2").Enabled {
+		t.Error("without a local store there is nothing to keep a copy in")
 	}
 }

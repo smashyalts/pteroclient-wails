@@ -1448,6 +1448,17 @@ textarea.mono {
     color: var(--danger-text);
 }
 
+/* An entry that is in the menu but cannot be used right now — kept in place
+   rather than removed, so the menu does not change shape between right-clicks
+   and the reason it is off can be seen. */
+.menu-item.disabled,
+.menu-item.disabled:hover {
+    opacity: .4;
+    cursor: default;
+    background: none;
+    color: var(--text-secondary);
+}
+
 .separator {
     height: 1px;
     margin: 5px 3px;
