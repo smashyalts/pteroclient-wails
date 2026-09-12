@@ -1,3 +1,16 @@
+// Copyright (C) 2025-2026 smashyalts
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU General Public License, version 3, as published
+// by the Free Software Foundation.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+// more details. You should have received a copy of it along with this program
+// in the LICENSE file at the root of this repository; if not, see
+// <https://www.gnu.org/licenses/>.
+
 // Command ptero-mcp is a self-hostable Model Context Protocol server for the
 // Pterodactyl panel's client API.
 //
@@ -25,6 +38,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -190,7 +204,7 @@ func serveHTTP(ctx context.Context, server *mcp.Server, opts options) error {
 	}
 }
 
-func printSummary(out *os.File, opts options, registry *Registry, set *toolset, server *mcp.Server, sources []string) {
+func printSummary(out io.Writer, opts options, registry *Registry, set *toolset, server *mcp.Server, sources []string) {
 	fmt.Fprintf(out, "%s\n", userAgent)
 
 	names := registry.Names()
@@ -227,7 +241,61 @@ func printSummary(out *os.File, opts options, registry *Registry, set *toolset, 
 	} else {
 		fmt.Fprintf(out, "  transport: stdio\n")
 	}
+
+	printCautions(out, registry, set)
+	fmt.Fprint(out, riskNotice)
 }
+
+// printCautions names the two conditions that turn a mistake into someone
+// else's outage: more than one panel behind one process, and destructive
+// tools being available at all.
+//
+// The gates refuse a panel name that does not exist, but they cannot know
+// that a name which does exist is the wrong one. Saying how many panels are
+// reachable is the only warning that can honestly be given.
+func printCautions(out io.Writer, registry *Registry, set *toolset) {
+	if count := len(registry.Names()); count > 1 {
+		fmt.Fprintf(out, "\n  CAUTION: %d panels are reachable from this process. A tool call that\n"+
+			"           names an existing but wrong panel reaches that panel's servers.\n"+
+			"           Run one process per panel if they belong to different people.\n", count)
+	}
+	if set.permitted(tierDestroy) {
+		fmt.Fprint(out, "\n  CAUTION: destructive tools are enabled. Files, databases, schedules and\n"+
+			"           backups can be deleted, and a server can be reinstalled over.\n")
+	}
+	if set.permitted(tierRaw) {
+		fmt.Fprint(out, "\n  CAUTION: the raw passthrough is enabled. It can reach any client API\n"+
+			"           route, including ones no other tool exposes.\n")
+	}
+}
+
+// riskNotice is printed at every start that prints a summary.
+//
+// It is here rather than only in the README because the person who suffers a
+// mistake is whoever launched the process, and the launch is the last moment
+// they are guaranteed to be looking.
+const riskNotice = `
+  NO WARRANTY, NO LIABILITY. This software is provided as is. It drives live
+  game servers over a real panel API, and it is driven by an AI assistant
+  that can pick the wrong panel or the wrong server, misread a file, or run a
+  command nobody asked for. The gates above reduce that risk. They do not
+  remove it.
+
+  You run this at your own risk and you are responsible for what it does to
+  your servers, your players and your data. Take backups. Give it an API key
+  scoped to only the servers it should reach. Neither the authors nor the
+  contributors accept liability for any loss, downtime or damage arising from
+  its use.
+
+  ptero-mcp  Copyright (C) 2025-2026 smashyalts. This program comes with
+  ABSOLUTELY NO WARRANTY. It is free software under the GNU General Public
+  License version 3, and you are welcome to redistribute it under those
+  terms; see the LICENSE file for the conditions, including sections 15 and
+  16, which are the warranty and liability terms that govern.
+
+  Suppress this notice with -quiet once you have read it.
+
+`
 
 const noPanelsHelp = `no panel configured.
 
