@@ -131,13 +131,28 @@ that loses data needs `-allow-destructive` plus a per-call confirmation. See
 [cmd/ptero-mcp/README.md](cmd/ptero-mcp/README.md) for configuration, the HTTP transport,
 Docker and the full tool list.
 
+**No warranty, no liability, run at your own risk.** An assistant driving this can act on
+the wrong panel or the wrong server. Take backups, and give it an API key scoped to only
+the servers it should reach. See [DISCLAIMER.md](DISCLAIMER.md).
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-[Add your license here]
+GNU General Public License, version 3. The full text is in [LICENSE](LICENSE).
+
+This is a copyleft licence. You may use, study, change and redistribute this
+software, and if you distribute a modified version — including running a
+modified `ptero-mcp` as a service that others connect to and then giving them
+a binary — you must release your changes under the GPL-3.0 as well, with
+source available to the people you gave it to.
+
+Sections 15 and 16 of that licence are the binding disclaimer of warranty and
+limitation of liability. [DISCLAIMER.md](DISCLAIMER.md) explains in plain
+language what that means for software that drives live game servers, and what
+an AI assistant can get wrong while doing it.
 
 ## Acknowledgments
 

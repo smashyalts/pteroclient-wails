@@ -12,6 +12,23 @@ connections are to the panels you configure.
 go build -o ptero-mcp ./cmd/ptero-mcp
 ```
 
+> ### ⚠️ Read this before pointing it at anything you would mind losing
+>
+> **No warranty. No liability. You run this at your own risk.** Sections 15 and 16 of the
+> [GPL-3.0 licence](../../LICENSE) are the binding terms; [DISCLAIMER.md](../../DISCLAIMER.md)
+> explains in plain language what they mean here.
+>
+> This is driven by an AI assistant, not by a person clicking a button, and an assistant
+> can act on the wrong panel, act on the wrong server, misread a file and write back
+> something that will not start, or run a command nobody asked for. The safeguards below
+> are real and they reduce that risk. **They cannot remove it** — nothing here can tell
+> that a panel name which exists is not the one you meant.
+>
+> Before you connect it: take a backup, and give it a client API key on an account that is
+> a subuser with access to only the servers it should reach. The key is the real boundary.
+> The flags are a convenience on top of it. Run one process per panel if the panels belong
+> to different people.
+
 ## Configure a panel
 
 Create a **client** API key in the panel under *Account → API Credentials*. A client key
@@ -51,7 +68,14 @@ needs no second copy of your keys.
 Every tool takes an optional `panel` argument. Omit it and the default panel is used; name
 one that does not exist and the call is refused with the list of configured names rather
 than quietly acting on the default, because the wrong panel can mean the wrong company's
-game server.
+game server. A name that *does* exist is accepted, so the list of configured panels is the
+list of panels one mistaken argument can reach.
+
+Every source above is read and merged, not just the first one that works. Set
+`PTERO_PANEL_URL` on a machine that already runs the desktop client and you have two panels
+reachable, not one. The startup summary prints the panels it found and where they came
+from, and warns when more than one is reachable. Read it once after any change, and run one
+process per panel when the panels belong to different people.
 
 ## Connect an assistant
 
@@ -150,6 +174,12 @@ itself. One mistaken tool call should not be able to empty a server's world fold
 `ptero_request` honours the same gates — read-only refuses a POST, and no
 `-allow-destructive` refuses a DELETE — otherwise it would be a way around every other
 decision here.
+
+Every start prints what it settled on to stderr: the panels it found, where the config came
+from, how many tools were registered, which gates are open, and the liability notice. It
+also prints a caution when more than one panel is reachable, when destructive tools are
+enabled, and when the passthrough is enabled. `-quiet` silences all of it once you have
+read it, which is what a service unit wants.
 
 `-tools` trims the registry by name, prefix or glob, which is how to hand an assistant the
 file tools and nothing else:
