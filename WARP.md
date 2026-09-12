@@ -74,11 +74,22 @@ go mod download
   - `multi_config.go`: Multi-panel configuration support
   - Config stored in `~/.pteroclient/config.json`
 
-- **pkg/pterodactyl/**: Pterodactyl API client
+- **pkg/pterodactyl/**: Pterodactyl API client used by the desktop app
   - `client.go`: REST API client for panel operations
   - `websocket.go`: WebSocket client for console access
   - Auto-detects admin vs client API keys
   - Handles server state, file management, power controls
+
+- **cmd/ptero-mcp/**: self-hostable MCP server exposing the whole client API as
+  tools (see `cmd/ptero-mcp/README.md`). Independent of the GUI: it uses
+  `pkg/pteroapi` and `pkg/mcp` rather than `pkg/pterodactyl`, because it needs
+  every route for any server on any configured panel, whereas the app's client
+  is shaped around one active server.
+  - `pkg/pteroapi/`: complete client API, stdlib only apart from the console
+    websocket; also holds the recursive file search the panel has no route for
+  - `pkg/mcp/`: minimal MCP protocol server with stdio and HTTP transports
+  - Tool tiers are gated at registration: reads and ordinary writes are on,
+    `-allow-destructive`/`-allow-account`/`-allow-raw` add the rest
 
 ### Frontend Structure (JavaScript/HTML)
 - **frontend/src/**: Main frontend source

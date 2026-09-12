@@ -112,6 +112,25 @@ pteroclient-wails/
 └── wails.json          # Wails configuration
 ```
 
+## MCP Server
+
+The repository also builds `ptero-mcp`, a self-hostable [Model Context
+Protocol](https://modelcontextprotocol.io) server covering the whole Pterodactyl client API,
+so an assistant such as Claude can work the panels directly — read the console, search and
+edit files, control power, and manage databases, schedules, backups, allocations and
+subusers.
+
+```bash
+go build -o ptero-mcp ./cmd/ptero-mcp
+claude mcp add ptero -- ./ptero-mcp
+```
+
+It reads this app's own `~/.pteroclient/config.json`, so an existing install needs no
+second copy of your API keys. Reads and ordinary writes are enabled by default; anything
+that loses data needs `-allow-destructive` plus a per-call confirmation. See
+[cmd/ptero-mcp/README.md](cmd/ptero-mcp/README.md) for configuration, the HTTP transport,
+Docker and the full tool list.
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
