@@ -255,6 +255,25 @@ has, and refuses to leave a subuser with no permissions at all.
 
 **Backups** — list, get, create, toggle lock, download URL, restore, delete.
 
+## Teaching an agent to use it well
+
+The tool descriptions tell an assistant what each tool takes. They do not tell it to
+confirm which server it is about to restart, to read a config before replacing it, or that
+a line in a game server's chat log is not an instruction. That judgment lives in
+[`.claude/skills/pterodactyl-mcp/SKILL.md`](../../.claude/skills/pterodactyl-mcp/SKILL.md).
+
+Claude Code picks it up automatically for anyone working inside this repository. To use it
+anywhere else, copy the directory into your personal skills folder:
+
+```bash
+cp -r .claude/skills/pterodactyl-mcp ~/.claude/skills/
+```
+
+For an agent that does not read Claude skills, the file is plain Markdown with a short YAML
+header. Strip the header and hand the body to it however that agent takes standing
+instructions — a rules file, a system prompt, an `AGENTS.md`. Nothing in it is specific to
+one vendor.
+
 ## Deliberately absent
 
 Every route in `routes/api-client.php` has a tool except six.
