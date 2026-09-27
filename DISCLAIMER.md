@@ -61,7 +61,10 @@ If you run this against anything you would mind losing:
   convenience on top of it.
 - **One process per panel.** Do not put a customer's panel and your own behind
   the same server.
-- **Leave `-allow-destructive` off** unless you are watching the session.
+- **Leave `-allow-destructive` off** unless you are watching the session, and when you
+  do need it, scope it to the panel or the server that can afford the mistake:
+  `-allow-destructive=lab/1a7ce997`. An out-of-scope call is then refused before it
+  reaches the panel.
 - **Use `-read-only` or `-tools`** when you only need it to look at things.
 - **Do not expose the HTTP transport publicly.** Keep it on loopback or behind
   a reverse proxy with authentication, and always set a bearer token.

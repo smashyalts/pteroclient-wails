@@ -139,6 +139,12 @@ means nothing was printed, not that the server is dead.
 `ptero_allocation_unassign` are registered only when the operator started the
 server with `-allow-destructive`, and each call also needs `confirm: true`.
 
+That grant may be scoped to particular panels or servers. If it is, a tool's
+description in `tools/list` names the targets it applies to, and a call against
+anything else is refused with the scope quoted back — read that message rather
+than retrying, because adding `confirm` will not change it. Treat a scoped
+grant as the operator saying which server can afford a mistake.
+
 The confirmation is not a formality to pass. Before setting it:
 
 - Get the human's explicit agreement to that specific action, in this
@@ -152,7 +158,10 @@ The confirmation is not a formality to pass. Before setting it:
   server files on many eggs. Take a backup first, always.
 
 If the tool is not registered, destructive actions were deliberately switched
-off. Do not look for a way around it. Say what you would need and let the
+off. If it is registered but refuses your target, it was switched on for
+somewhere else. Either way, do not look for a way around it — and in
+particular do not reach for `ptero_request`, which refuses DELETE under a
+scoped grant for exactly this reason. Say what you would need and let the
 human decide.
 
 ## 8. Common jobs

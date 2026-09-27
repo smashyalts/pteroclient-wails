@@ -23,6 +23,47 @@ type PanelSpec struct {
 	// DefaultServer lets the server argument be omitted on every tool call.
 	// Most self-hosters point this at the one server they care about.
 	DefaultServer string `json:"default_server,omitempty"`
+
+	// AllowDestructive scopes destructive tools to this panel: true for every
+	// server on it, or a list of server identifiers. Absent means none, and a
+	// panel left absent stays read-and-ordinary-writes even when another panel
+	// in the same file opts in.
+	AllowDestructive json.RawMessage `json:"allow_destructive,omitempty"`
+}
+
+// destructiveTargets reads a panel's allow_destructive field into the policy.
+//
+// The field takes true for the whole panel or a list of server identifiers,
+// because "this panel is my own test box" and "this one server is disposable"
+// are both things an operator means, and making them write a flag for it would
+// mean the scope lives somewhere other than next to the panel it describes.
+func (s PanelSpec) destructiveTargets(into *destructivePolicy) error {
+	raw := strings.TrimSpace(string(s.AllowDestructive))
+	if raw == "" || raw == "null" || raw == "false" {
+		return nil
+	}
+
+	if raw == "true" {
+		into.allowPanel(s.Name)
+		return nil
+	}
+
+	var servers []string
+	if err := json.Unmarshal(s.AllowDestructive, &servers); err != nil {
+		return fmt.Errorf("panel %q: allow_destructive has to be true, false, or a list of "+
+			"server identifiers: %w", s.Name, err)
+	}
+	for _, server := range servers {
+		if server = strings.TrimSpace(server); server == "" {
+			continue
+		}
+		if server == "*" {
+			into.allowPanel(s.Name)
+			continue
+		}
+		into.allowServer(s.Name, server)
+	}
+	return nil
 }
 
 // Registry holds the configured panels and the clients built for them.
@@ -143,6 +184,8 @@ type configFile struct {
 		// DefaultServer is ours; ServerID is the app's.
 		DefaultServer string `json:"default_server"`
 		ServerID      string `json:"server_id"`
+		// AllowDestructive scopes destructive tools to this panel.
+		AllowDestructive json.RawMessage `json:"allow_destructive"`
 	} `json:"panels"`
 
 	DefaultPanel string `json:"default_panel"`
@@ -158,10 +201,11 @@ func (f configFile) specs() []PanelSpec {
 	out := make([]PanelSpec, 0, len(f.Panels)+1)
 	for _, entry := range f.Panels {
 		spec := PanelSpec{
-			Name:          entry.Name,
-			URL:           firstNonEmpty(entry.URL, entry.PanelURL),
-			APIKey:        entry.APIKey,
-			DefaultServer: firstNonEmpty(entry.DefaultServer, entry.ServerID),
+			Name:             entry.Name,
+			URL:              firstNonEmpty(entry.URL, entry.PanelURL),
+			APIKey:           entry.APIKey,
+			DefaultServer:    firstNonEmpty(entry.DefaultServer, entry.ServerID),
+			AllowDestructive: entry.AllowDestructive,
 		}
 		out = append(out, spec)
 	}

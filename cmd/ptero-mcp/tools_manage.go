@@ -657,8 +657,20 @@ func (t *toolset) registerRawTool(s *mcp.Server) {
 					return "", fmt.Errorf("this server is running read-only; %s is not allowed", method)
 				}
 			case http.MethodDelete:
+				// A free-form path is not a target this server can resolve, so
+				// a scoped grant cannot be checked against it. Rather than
+				// guess which server a path refers to, DELETE here needs the
+				// unscoped grant; otherwise the passthrough would be a way
+				// around the per-server limit.
 				if !t.permitted(tierDestroy) {
 					return "", fmt.Errorf("DELETE needs -allow-destructive, which this server was not started with")
+				}
+				if !t.allow.destroy.all {
+					return "", fmt.Errorf(
+						"DELETE through the passthrough needs an unscoped -allow-destructive; "+
+							"this server limits destructive tools to %s, and a raw path cannot be "+
+							"checked against that. Use the named tool for the resource instead",
+						t.allow.destroy.describe())
 				}
 			default:
 				return "", fmt.Errorf("unsupported method %q", method)

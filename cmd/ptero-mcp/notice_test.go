@@ -111,7 +111,7 @@ func TestDestructiveAndRawGatesRaiseCautions(t *testing.T) {
 		t.Errorf("the default run should not warn about the passthrough:\n%s", plain)
 	}
 
-	open := summarize(t, onePanel(), permissions{write: true, destroy: true, raw: true}, options{})
+	open := summarize(t, onePanel(), permissions{write: true, destroy: destructivePolicy{all: true}, raw: true}, options{})
 	if !strings.Contains(open, "destructive tools are enabled") {
 		t.Errorf("the destructive caution is missing:\n%s", open)
 	}
@@ -121,7 +121,7 @@ func TestDestructiveAndRawGatesRaiseCautions(t *testing.T) {
 }
 
 func TestSummaryNeverPrintsAnAPIKey(t *testing.T) {
-	summary := summarize(t, twoPanels(), permissions{write: true, destroy: true, account: true, raw: true},
+	summary := summarize(t, twoPanels(), permissions{write: true, destroy: destructivePolicy{all: true}, account: true, raw: true},
 		options{httpAddr: ":8472", token: "super-secret-bearer"})
 
 	for _, secret := range []string{"ptlc_a", "ptlc_b", "super-secret-bearer"} {
