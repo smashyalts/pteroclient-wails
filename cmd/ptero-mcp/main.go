@@ -71,7 +71,7 @@ type options struct {
 	requestTimeout time.Duration
 
 	readOnly         bool
-	allowDestructive bool
+	allowDestructive destructivePolicy
 	allowAccount     bool
 	allowRaw         bool
 
@@ -97,8 +97,11 @@ func run() error {
 
 	flag.BoolVar(&opts.readOnly, "read-only", envBool("PTERO_MCP_READ_ONLY"),
 		"register only tools that read; nothing can be changed")
-	flag.BoolVar(&opts.allowDestructive, "allow-destructive", envBool("PTERO_MCP_ALLOW_DESTRUCTIVE"),
-		"also register tools that lose data: deleting files, restoring or deleting backups, reinstalling a server. Each call additionally needs confirm: true")
+	destructive := &destructiveFlag{policy: &opts.allowDestructive}
+	flag.Var(destructive, "allow-destructive",
+		"also register tools that lose data: deleting files, restoring or deleting backups, reinstalling a server. "+
+			"Bare for every panel and server, or scope it: -allow-destructive=panel, -allow-destructive=panel/server, "+
+			"comma separated. Each call additionally needs confirm: true")
 	flag.BoolVar(&opts.allowAccount, "allow-account", envBool("PTERO_MCP_ALLOW_ACCOUNT"),
 		"also register tools that change the panel account's API keys and SSH keys")
 	flag.BoolVar(&opts.allowRaw, "allow-raw", envBool("PTERO_MCP_ALLOW_RAW"),
@@ -111,6 +114,23 @@ func run() error {
 	flag.BoolVar(&opts.quiet, "quiet", false, "do not write the startup summary to stderr")
 
 	flag.Parse()
+
+	// A bare boolean flag never consumes the next argument, so
+	// "-allow-destructive main/abc" would grant everything and leave main/abc
+	// as a positional. Say so rather than quietly over-granting.
+	if stray := flag.Args(); len(stray) > 0 {
+		return fmt.Errorf("unexpected argument %q; scope the flag with an equals sign, "+
+			"as -allow-destructive=%s", stray[0], stray[0])
+	}
+	if !destructive.set {
+		if env := os.Getenv("PTERO_MCP_ALLOW_DESTRUCTIVE"); env != "" {
+			parsed, err := parseDestructiveTargets(env)
+			if err != nil {
+				return fmt.Errorf("PTERO_MCP_ALLOW_DESTRUCTIVE: %w", err)
+			}
+			opts.allowDestructive = parsed
+		}
+	}
 
 	if opts.showVer {
 		fmt.Println(userAgent)
@@ -130,11 +150,20 @@ func run() error {
 		return err
 	}
 
+	// A panel's own allow_destructive adds to whatever the flag said, so a
+	// config file can mark one disposable server without the launch command
+	// having to repeat it.
+	for _, spec := range specs {
+		if err := spec.destructiveTargets(&opts.allowDestructive); err != nil {
+			return err
+		}
+	}
+
 	set := &toolset{
 		registry: registry,
 		allow: permissions{
-			write:     true, // reads and ordinary writes are the point of this
-			destroy:   opts.allowDestructive,
+			write:     true,                  // reads and ordinary writes are the point of this
+			destroy:   opts.allowDestructive, // a policy, not a boolean
 			account:   opts.allowAccount,
 			raw:       opts.allowRaw,
 			readOnly:  opts.readOnly,
@@ -260,8 +289,9 @@ func printCautions(out io.Writer, registry *Registry, set *toolset) {
 			"           Run one process per panel if they belong to different people.\n", count)
 	}
 	if set.permitted(tierDestroy) {
-		fmt.Fprint(out, "\n  CAUTION: destructive tools are enabled. Files, databases, schedules and\n"+
-			"           backups can be deleted, and a server can be reinstalled over.\n")
+		fmt.Fprintf(out, "\n  CAUTION: destructive tools are enabled on %s.\n"+
+			"           Files, databases, schedules and backups can be deleted there,\n"+
+			"           and a server can be reinstalled over.\n", set.allow.destroy.describe())
 	}
 	if set.permitted(tierRaw) {
 		fmt.Fprint(out, "\n  CAUTION: the raw passthrough is enabled. It can reach any client API\n"+

@@ -186,7 +186,7 @@ func TestDestructiveToolsAreWithheldByDefault(t *testing.T) {
 
 func TestReadOnlyWithholdsEveryWrite(t *testing.T) {
 	panel, requests := fakePanel(t)
-	server := build(t, permissions{write: true, destroy: true, account: true, raw: true, readOnly: true}, panel.URL)
+	server := build(t, permissions{write: true, destroy: destructivePolicy{all: true}, account: true, raw: true, readOnly: true}, panel.URL)
 
 	for _, name := range server.ToolNames() {
 		switch name {
@@ -208,7 +208,7 @@ func TestReadOnlyWithholdsEveryWrite(t *testing.T) {
 
 func TestDestructiveToolsNeedConfirm(t *testing.T) {
 	panel, requests := fakePanel(t)
-	server := build(t, permissions{write: true, destroy: true}, panel.URL)
+	server := build(t, permissions{write: true, destroy: destructivePolicy{all: true}}, panel.URL)
 
 	// The flag says the process may destroy things; confirm says this call
 	// meant to.
@@ -235,7 +235,7 @@ func TestDestructiveToolsNeedConfirm(t *testing.T) {
 
 func TestDeletingTheWholeServerDirectoryIsRefused(t *testing.T) {
 	panel, requests := fakePanel(t)
-	server := build(t, permissions{write: true, destroy: true}, panel.URL)
+	server := build(t, permissions{write: true, destroy: destructivePolicy{all: true}}, panel.URL)
 
 	for _, name := range []string{"/", ".", "", "  "} {
 		text, isError := invoke(t, server, "ptero_files_delete", map[string]interface{}{

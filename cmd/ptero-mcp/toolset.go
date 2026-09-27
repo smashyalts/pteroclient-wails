@@ -48,8 +48,13 @@ const (
 
 // permissions is what this process was started willing to do.
 type permissions struct {
-	write     bool
-	destroy   bool
+	write bool
+
+	// destroy says where destructive tools may run, which may be everywhere,
+	// a few panels, or a few named servers. An empty policy means nowhere,
+	// and then the tools are never registered.
+	destroy destructivePolicy
+
 	account   bool
 	raw       bool
 	readOnly  bool
@@ -83,7 +88,9 @@ func (t *toolset) permitted(level tier) bool {
 	case tierWrite:
 		return t.allow.write && !t.allow.readOnly
 	case tierDestroy:
-		return t.allow.destroy && !t.allow.readOnly
+		// Registration hangs on whether anything at all is in scope; which
+		// panel and server is checked per call, once the target is known.
+		return t.allow.destroy.any() && !t.allow.readOnly
 	case tierAccount:
 		return t.allow.account && !t.allow.readOnly
 	case tierRaw:
@@ -131,13 +138,31 @@ func (t *toolset) add(server *mcp.Server, level tier, tool mcp.Tool) {
 			"Must be true. This action cannot be undone, so it is refused without an explicit confirmation.").Req())
 
 		inner := tool.Handler
+		name := tool.Name
 		tool.Handler = func(ctx context.Context, args mcp.Args) (string, error) {
+			// Scope before confirm: when the target was never in scope, "this
+			// server is out of scope" is the useful answer, and "you forgot
+			// confirm" would invite a retry that cannot succeed.
+			_, panel, server, err := t.resolveTarget(args)
+			if err != nil {
+				return "", err
+			}
+			if !t.allow.destroy.allows(panel, server) {
+				return "", fmt.Errorf(
+					"refused: %s is not allowed on %s/%s. This server was started with "+
+						"destructive tools limited to %s. Widen -allow-destructive to change that",
+					name, panel, server, t.allow.destroy.describe())
+			}
 			if !args.Bool("confirm", false) {
-				return "", fmt.Errorf("refused: %s destroys data and needs confirm: true", tool.Name)
+				return "", fmt.Errorf("refused: %s destroys data and needs confirm: true", name)
 			}
 			return inner(ctx, args)
 		}
+
 		tool.Description += " Irreversible; requires confirm: true."
+		if !t.allow.destroy.all {
+			tool.Description += " Allowed only on: " + t.allow.destroy.describe() + "."
+		}
 	}
 
 	server.Register(tool)
@@ -146,14 +171,25 @@ func (t *toolset) add(server *mcp.Server, level tier, tool mcp.Tool) {
 
 // target resolves the panel and server a call names.
 func (t *toolset) target(args mcp.Args) (*pteroapi.Client, string, error) {
+	client, _, server, err := t.resolveTarget(args)
+	return client, server, err
+}
+
+// resolveTarget resolves a call's panel and server, returning the panel's
+// canonical name as well.
+//
+// The destructive gate needs the panel name to decide scope, and it has to be
+// the name the registry settled on rather than whatever the caller typed, or a
+// difference in case would read as a different panel.
+func (t *toolset) resolveTarget(args mcp.Args) (*pteroapi.Client, string, string, error) {
 	client, spec, err := t.registry.Resolve(args.String("panel", ""))
 	if err != nil {
-		return nil, "", err
+		return nil, "", "", err
 	}
 
 	server := strings.TrimSpace(args.String("server", spec.DefaultServer))
 	if server == "" {
-		return nil, "", fmt.Errorf("no server given, and panel %q has no default_server configured", spec.Name)
+		return nil, "", "", fmt.Errorf("no server given, and panel %q has no default_server configured", spec.Name)
 	}
 	// A pasted panel URL instead of an id is a common slip and cheap to
 	// recover from: the id is the last path segment.
@@ -161,7 +197,7 @@ func (t *toolset) target(args mcp.Args) (*pteroapi.Client, string, error) {
 		parts := strings.Split(strings.Trim(server, "/"), "/")
 		server = parts[len(parts)-1]
 	}
-	return client, server, nil
+	return client, spec.Name, server, nil
 }
 
 // panelOnly resolves just the panel, for the account and listing routes that

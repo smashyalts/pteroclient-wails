@@ -165,7 +165,7 @@ says can talk the server into running it.
 | --- | --- | --- |
 | — | reads, and writes that can be undone: file writes, power signals, commands, creating databases, schedules and backups | on |
 | `-read-only` | nothing; withholds every write | off |
-| `-allow-destructive` | deleting files, extracting archives, restoring and deleting backups, reinstalling a server, deleting databases, schedules, subusers and allocations | off |
+| `-allow-destructive` | deleting files, extracting archives, restoring and deleting backups, reinstalling a server, deleting databases, schedules, subusers and allocations. Takes optional targets, so it can be limited to one panel or one server | off |
 | `-allow-account` | the panel account's own API keys and SSH keys | off |
 | `-allow-raw` | `ptero_request`, which calls any client API route by path | off |
 
@@ -174,6 +174,57 @@ itself. One mistaken tool call should not be able to empty a server's world fold
 `ptero_request` honours the same gates — read-only refuses a POST, and no
 `-allow-destructive` refuses a DELETE — otherwise it would be a way around every other
 decision here.
+
+### Scoping destructive tools to one panel or one server
+
+A single process-wide switch meant that enabling file deletion for a disposable test box
+also enabled it for every customer panel the same process could reach. The flag takes
+targets for that reason:
+
+```bash
+ptero-mcp -allow-destructive              # every panel and server, as before
+ptero-mcp -allow-destructive=lab          # every server on the panel named lab
+ptero-mcp -allow-destructive=lab/1a7ce997 # that one server
+ptero-mcp -allow-destructive=lab,prod/1a7ce997
+```
+
+Or put it next to the panel it describes, in `panels.json`, where `true` means the whole
+panel and a list means those servers:
+
+```json
+{
+  "panels": [
+    { "name": "lab",      "url": "...", "api_key": "...", "allow_destructive": true },
+    { "name": "prod",     "url": "...", "api_key": "...", "allow_destructive": ["1a7ce997"] },
+    { "name": "customer", "url": "...", "api_key": "..." }
+  ]
+}
+```
+
+Config targets add to whatever the flag said. A panel with no `allow_destructive` stays at
+reads and ordinary writes even when another panel in the same file opts in.
+
+Two properties hold regardless of scope. When **nothing** is in scope the destructive tools
+are not registered at all, so the original guarantee survives — they cannot be called and
+do not appear in `tools/list`. When something is in scope they are registered, and each
+call is checked against the panel and server it resolved to, before the `confirm` check, so
+an out-of-scope call is refused without reaching the panel:
+
+```
+refused: ptero_files_delete is not allowed on customer/bbb. This server was started
+with destructive tools limited to lab/aaa. Widen -allow-destructive to change that
+```
+
+The scope also appears in each tool's description in `tools/list`, so an assistant learns
+the limit before spending a call on it, and in the startup caution, which names the targets
+rather than just saying "enabled".
+
+One exception: `ptero_request` refuses DELETE under a *scoped* grant. A free-form path is
+not a target this server can resolve, so it cannot be checked, and guessing would make the
+passthrough a way around the limit. Raw DELETE needs the unscoped flag.
+
+This is the second lock, not the first. An API key scoped to only the servers it should
+reach is still the boundary that matters.
 
 Every start prints what it settled on to stderr: the panels it found, where the config came
 from, how many tools were registered, which gates are open, and the liability notice. It
