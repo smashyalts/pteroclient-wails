@@ -2821,3 +2821,25 @@ input.theme-hex {
     background: rgba(239, 68, 68, .16);
     color: var(--danger-text);
 }
+
+/* Backup download progress.
+   Inline in the list row rather than a separate panel: the transfer belongs
+   to the backup it came from, and a download list somewhere else would mean
+   looking in two places to answer one question. */
+.dl-bar {
+    display: block;
+    height: 3px;
+    width: 100%;
+    max-width: 320px;
+    margin: 4px 0;
+    border-radius: 2px;
+    background: var(--line);
+    overflow: hidden;
+}
+
+.dl-bar > span {
+    display: block;
+    height: 100%;
+    background: var(--accent);
+    transition: width 220ms ease-out;
+}

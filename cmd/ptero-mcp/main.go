@@ -42,10 +42,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"pteroclient-wails/pkg/download"
 	"pteroclient-wails/pkg/mcp"
 )
 
@@ -74,6 +76,10 @@ type options struct {
 	allowDestructive destructivePolicy
 	allowAccount     bool
 	allowRaw         bool
+
+	downloadDir  string
+	downloadJobs int
+	downloadConn int
 
 	toolFilter string
 	listTools  bool
@@ -106,6 +112,15 @@ func run() error {
 		"also register tools that change the panel account's API keys and SSH keys")
 	flag.BoolVar(&opts.allowRaw, "allow-raw", envBool("PTERO_MCP_ALLOW_RAW"),
 		"also register ptero_request, which can call any client API route by path")
+
+	flag.StringVar(&opts.downloadDir, "download-dir", os.Getenv("PTERO_MCP_DOWNLOAD_DIR"),
+		"directory to save backup downloads into; without it the download tools are not registered")
+	flag.IntVar(&opts.downloadJobs, "download-jobs", 2,
+		"how many backups to download at once. Against a node-stored backup this is the only "+
+			"parallelism available, since each one is stuck on a single stream")
+	flag.IntVar(&opts.downloadConn, "download-connections", 8,
+		"parallel connections per backup, used only where the host honours range requests, "+
+			"which in practice means a bucket-stored backup")
 
 	flag.StringVar(&opts.toolFilter, "tools", os.Getenv("PTERO_MCP_TOOLS"),
 		"comma-separated tool names, prefixes or globs to register; omit for all of them")
@@ -171,10 +186,26 @@ func run() error {
 		},
 	}
 
+	if dir := strings.TrimSpace(opts.downloadDir); dir != "" {
+		resolved, err := filepath.Abs(dir)
+		if err != nil {
+			return fmt.Errorf("-download-dir %q: %w", dir, err)
+		}
+		if err := os.MkdirAll(resolved, 0o755); err != nil {
+			return fmt.Errorf("cannot use %s for downloads: %w", resolved, err)
+		}
+		set.downloadDir = resolved
+		set.pool = download.NewPool(context.Background(), opts.downloadJobs, download.Options{
+			Parts: opts.downloadConn,
+		}, nil)
+		defer set.pool.Close()
+	}
+
 	server := mcp.NewServer(serverName, version)
 	set.registerServerTools(server)
 	set.registerFileTools(server)
 	set.registerManagementTools(server)
+	set.registerDownloadTools(server)
 	set.registerRawTool(server)
 
 	if set.registered == 0 {

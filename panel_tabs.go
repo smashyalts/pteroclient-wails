@@ -13,11 +13,15 @@ import (
 // all act on the active server, the same way the console and power controls
 // do — switching servers goes through SwitchServer first.
 //
-// There is no Backups binding and no ReinstallServer binding. A restore
+// There is no backup restore binding and no ReinstallServer binding. A restore
 // overwrites every file on the server and a reinstall wipes them on some eggs;
 // neither is recoverable from anything this app keeps locally, so they are left
 // out of the app rather than guarded by a dialog. The panel's own UI still has
 // them.
+//
+// Listing and downloading backups is in backups.go. That reasoning does not
+// reach reading a backup: it changes nothing on the panel, and it is the one
+// operation that makes the others survivable.
 
 func (a *App) requireClient() error {
 	if a.client == nil {

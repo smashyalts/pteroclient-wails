@@ -7,6 +7,7 @@ import (
 	"path"
 	"strings"
 
+	"pteroclient-wails/pkg/download"
 	"pteroclient-wails/pkg/mcp"
 	"pteroclient-wails/pkg/pteroapi"
 )
@@ -65,6 +66,13 @@ type permissions struct {
 type toolset struct {
 	registry *Registry
 	allow    permissions
+
+	// pool runs backup downloads in the background. Nil when no download
+	// directory was configured, in which case the download tools are not
+	// registered at all: a tool that has nowhere to write is worse than a
+	// tool that is absent.
+	pool        *download.Pool
+	downloadDir string
 
 	// registered and skipped are reported at startup so an operator can see
 	// what the flags actually produced.

@@ -70,6 +70,10 @@ type App struct {
 	sftpCancel func()
 	sftpHosts  *sftpx.KnownHosts
 
+	// The backup download queue. See backups.go — created on first use,
+	// because most sessions never pull a backup.
+	downloads downloadState
+
 	// Set when this process was launched as a console window rather than the
 	// main app. See main.go and OpenConsoleWindow.
 	consoleOnly      bool
@@ -99,6 +103,11 @@ func NewApp() *App {
 func (a *App) shutdown(ctx context.Context) {
 	// The SFTP session first: it holds a password, and closing it is local.
 	a.SFTPDisconnect()
+
+	// Downloads next, and cancelled rather than waited for. A partly fetched
+	// archive stays on disk and can be resumed, so stopping costs nothing,
+	// while blocking the close on a multi-gigabyte transfer looks like a hang.
+	a.shutdownDownloads()
 
 	done := make(chan struct{})
 	go func() {
