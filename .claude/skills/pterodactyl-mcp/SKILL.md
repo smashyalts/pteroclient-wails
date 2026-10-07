@@ -193,6 +193,23 @@ what is there, so you can pause one without retyping its cron. Same for
 **"Who did this?"** — `ptero_server_activity` is the audit log: who acted,
 from which IP, when.
 
+**"Download a backup"** — `ptero_backup_download` queues it and returns a job
+id; `ptero_downloads` reports progress. It returns immediately because a
+backup is gigabytes, so poll rather than assuming it failed.
+
+Do not promise a speed. A backup kept on the node comes down as a single
+stream that cannot be resumed, because wings ignores range requests; one kept
+in a bucket is pulled over several connections and can be resumed. The client
+API does not say which — the backup record has no disk field — so it is only
+known once the transfer starts, and `ptero_downloads` reports it as `parallel`
+and `connections`. Pulling several backups at once is the only speedup that
+works in both cases.
+
+A failed download can simply be queued again; it picks up where it stopped
+where the host allows that. The archive is checked against the panel's
+checksum before it is kept, so a job that reports done is a file that
+verified.
+
 ## 9. When the panel refuses
 
 Errors come back with the panel's own explanation. Read it rather than

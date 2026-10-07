@@ -94,6 +94,7 @@
         <button class="tab" data-tab="startup" data-icon="sliders" type="button">Startup</button>
         <button class="tab" data-tab="settings" data-icon="cog" type="button">Server</button>
         <button class="tab" data-tab="transfer" data-icon="plug" type="button">Transfer</button>
+        <button class="tab" data-tab="backups" data-icon="archive" type="button">Backups</button>
         <!-- Activity is this server's audit log, so it belongs with the
              server's own tabs. Below the separator are the app's. -->
         <button class="tab" data-tab="activity" data-icon="activity" type="button">Activity</button>
@@ -322,6 +323,23 @@
         </div>
 
         <!-- Transfer ------------------------------------------------------ -->
+        <!-- Backups ---------------------------------------------------- -->
+        <!-- Listing and downloading only. Restore and delete are left out
+             for the same reason they are left out of the Go bindings: a
+             restore overwrites every file on the server and nothing this app
+             keeps locally can undo it. -->
+        <div id="backupsTab" class="tab-content">
+            <div class="toolbar">
+                <span class="toolbar-title">Backups</span>
+                <span class="list-sub">Saving to <span class="mono" id="backupsFolder"></span></span>
+                <div class="spacer"></div>
+                <button id="backupsFolderBtn" type="button">Change folder</button>
+                <button id="backupsClearBtn" type="button">Clear finished</button>
+                <button data-reload="backups" type="button">Refresh</button>
+            </div>
+            <div class="pane" id="backupsBody"></div>
+        </div>
+
         <div id="transferTab" class="tab-content">
             <div class="toolbar">
                 <span class="toolbar-title">Transfer</span>
@@ -500,6 +518,7 @@
 <script src="./split-view.js"></script>
 <script src="./sftp.js"></script>
 <script src="./transfer.js"></script>
+<script src="./backups.js"></script>
 <script src="./vault.js"></script>
 <script src="./appearance.js"></script>
 <script src="./appsettings.js"></script>

@@ -304,7 +304,56 @@ not mean retyping its cron.
 `revoke` as well as a whole `permissions` set, merging them against what the user already
 has, and refuses to leave a subuser with no permissions at all.
 
-**Backups** — list, get, create, toggle lock, download URL, restore, delete.
+**Backups** — list, get, create, toggle lock, download URL, restore, delete, and a
+downloader: `ptero_backup_download`, `ptero_downloads`, `ptero_download_cancel`. Those three
+only appear when the server was started with `-download-dir`; a tool with nowhere to write
+is worse than a tool that is absent.
+
+### How fast a backup download can be
+
+Set by the panel, not by us, and the ceiling is lower than it looks. Reading the source is
+the only way to know which case you are in:
+
+- Stock wings serves `/download/backup` by writing the file straight to the response. No
+  `Accept-Ranges`, and a `Range` header is ignored — ask for the first megabyte and you get
+  the whole archive with a `200`. So a **node-stored backup is one stream and cannot be
+  resumed**, and splitting it into parts would fetch the entire file once per part.
+- Wings also treats the download token as single use, so every request needs a freshly
+  minted URL.
+- A **bucket-stored backup is a presigned S3 URL**, which honours ranges and may serve any
+  number of connections at once. That one downloads in parallel and resumes.
+
+The client API will not tell you which you have: its backup transformer returns `uuid`,
+`name`, `bytes`, `checksum`, the two flags and the timestamps, with **no `disk` field**. So
+the downloader works it out from the signed URL — a presigned link carries
+`X-Amz-Signature`, a wings link is the node's `/download/backup` — and then probes for range
+support anyway, because a host may sit behind a proxy that adds it.
+
+The probe is built to cost nothing: the first request asks for exactly the first part, so a
+`206` starts the parallel path while a `200` means the body already arriving *is* the
+download.
+
+What is done for the single-stream case, which is the common one:
+
+- An 8 MiB socket receive buffer. On a long link the receive window, not the bandwidth, is
+  the cap: at 100 ms round trip a default window tops out around 20 Mbit/s however much
+  capacity either end has.
+- HTTP/1.1 rather than HTTP/2, whose per-stream flow-control window is a second ceiling to
+  hit when there is nothing to multiplex with.
+- No compression, since the archive is already gzipped.
+- The file is preallocated, and the checksum is computed from the bytes as they arrive, so
+  verifying does not cost a second full read of a multi-gigabyte file.
+
+Parallelism across *several* backups still works everywhere, and `-download-jobs` sets it.
+That is the only speedup available for node-stored backups.
+
+Downloads are verified against the panel's own checksum before the file is moved into
+place, retried with fresh URLs and backoff, and left as a `.ptpart` file with a manifest if
+they stop, so a cancelled or crashed transfer resumes where ranges allow it.
+
+What is deliberately **not** done: opening several connections that each fetch the whole
+file to dodge a per-connection throttle. That is N times the host's egress for at best N
+times the speed, on infrastructure you do not own.
 
 ## Teaching an agent to use it well
 
